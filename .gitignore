@@ -2,3 +2,4 @@
 .playwright-mcp/
 .DS_Store
 *.log
+spec/
