@@ -50,6 +50,15 @@
   .wallgrid label { font-size: 12px; color: #4b5160; }
   .wallgrid input.wlen { width: 88px; text-align: right; }
   .wallgrid .ro { font-size: 12px; color: #98a0ad; width: 88px; text-align: right; font-style: italic; }
+  /* mode toolbar (3 buttons) */
+  #modebar .btn { font-size: 11.5px; padding: 7px 3px; white-space: nowrap; }
+  /* partitions */
+  .partsec { margin-top: 9px; }
+  .btn.small.addpart { width: 100%; }
+  .partlist { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .partrow { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; color: #4b5160; }
+  .partrow b { font-weight: 600; color: #1f2430; }
+  .partrow .rmpart { padding: 2px 6px; font-size: 12px; }
   .hint { font-size: 12px; line-height: 1.5; color: #6b7280; background: #f4f6fb; border: 1px solid #e4e9f5; border-radius: 8px; padding: 9px 11px; }
   .hint b { color: #1f2430; }
   kbd { background: #eceef2; border: 1px solid #d3d6dd; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; font-family: ui-monospace, monospace; }
@@ -58,6 +67,7 @@
   #stage { flex: 1; position: relative; background: #f5f6f8; overflow: hidden; min-width: 0; }
   svg { width: 100%; height: 100%; display: block; }
   #stage.draw svg { cursor: crosshair; }
+  #stage.partition svg { cursor: crosshair; }
   #stage.select svg { cursor: default; }
 
   /* HUD */
@@ -78,8 +88,9 @@
     <p class="sub">Сравнение квартир в реальном масштабе</p>
 
     <div class="section">
-      <div class="row">
-        <button class="btn primary" id="btnDraw" style="flex:1">✏️ Рисовать стены</button>
+      <div class="row" id="modebar">
+        <button class="btn" id="btnDraw" style="flex:1">✏️ Контур</button>
+        <button class="btn" id="btnPart" style="flex:1">🧱 Перегородки</button>
         <button class="btn" id="btnSelect" style="flex:1">✋ Двигать</button>
       </div>
       <div class="hint" id="hint"></div>
@@ -168,6 +179,7 @@ let shiftHeld = false;
 let drag = null;                         // {type, ...}
 let editWall = null;                     // {id, k} — wall highlighted / being edited
 const openWalls = new Set();             // apartment ids whose "Размеры стен" accordion is open
+let partDraft = null;                    // {aptId, points:[local]} — interior partition being drawn
 
 const stage = document.getElementById("stage");
 const svg = document.getElementById("svg");
@@ -233,8 +245,9 @@ function render(){
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
   drawGrid(W, H);
-  for (const a of state.apartments) if (a.visible) drawApartment(a);
+  for (const a of state.apartments) if (a.visible){ drawApartment(a); drawPartitions(a); }
   if (state.mode === "draw") drawRubber();
+  if (state.mode === "partition") drawPartDraft();
   drawHandles();
   updateHud(W, H);
   updateStats();
@@ -313,6 +326,41 @@ function drawApartment(a){
   if (isA) for (const p of scr) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:4, fill:"#fff", stroke:a.color, "stroke-width":2 }));
 }
 
+function partLen(part){ let s=0; for (let i=0;i<part.points.length-1;i++) s += dist(part.points[i], part.points[i+1]); return s; }
+
+// interior partitions, transformed by the apartment (so they move/rotate with the overlay)
+function drawPartitions(a){
+  const parts = a.partitions || []; if (!parts.length) return;
+  const isA = a.id === state.activeId;
+  for (const part of parts){
+    const scr = part.points.map(p => worldToScreen(localToWorld(a, p)));
+    for (let i=0;i<scr.length-1;i++)
+      svg.appendChild(el("line", { x1:scr[i].x, y1:scr[i].y, x2:scr[i+1].x, y2:scr[i+1].y, stroke:a.color, "stroke-width": isA?2.5:2, "stroke-linecap":"round", "stroke-linejoin":"round" }));
+    if (isA || state.showAll)
+      for (let i=0;i<scr.length-1;i++)
+        svg.appendChild(lenBadge((scr[i].x+scr[i+1].x)/2, (scr[i].y+scr[i+1].y)/2, fmt(dist(part.points[i], part.points[i+1]))+" м", a.color));
+    if (isA) for (const p of scr) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:3, fill:"#fff", stroke:a.color, "stroke-width":1.5 }));
+  }
+}
+
+function drawPartDraft(){
+  if (!partDraft) return;
+  const a = state.apartments.find(x => x.id === partDraft.aptId); if (!a) return;
+  const scr = partDraft.points.map(p => worldToScreen(localToWorld(a, p)));
+  for (let i=0;i<scr.length-1;i++)
+    svg.appendChild(el("line", { x1:scr[i].x, y1:scr[i].y, x2:scr[i+1].x, y2:scr[i+1].y, stroke:a.color, "stroke-width":2.5, "stroke-linecap":"round" }));
+  for (const p of scr) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:3, fill:a.color }));
+  if (partDraft.points.length){
+    const lastL = partDraft.points[partDraft.points.length-1];
+    const last = worldToScreen(localToWorld(a, lastL));
+    const curL = partDrawPoint(), curS = worldToScreen(localToWorld(a, curL));
+    svg.appendChild(el("line", { x1:last.x, y1:last.y, x2:curS.x, y2:curS.y, stroke:a.color, "stroke-width":2, "stroke-dasharray":"6 5", opacity:.8 }));
+    svg.appendChild(el("circle", { cx:curS.x, cy:curS.y, r:3, fill:a.color }));
+    svg.appendChild(lenBadge((last.x+curS.x)/2, (last.y+curS.y)/2 - 10, fmt(dist(lastL, curL))+" м", a.color));
+    if (document.activeElement !== lenInput) lenInput.value = fmt(dist(lastL, curL));
+  }
+}
+
 function drawRubber(){
   const a = activeApt();
   if (!a || a.closed || !a.points.length) return;
@@ -342,11 +390,14 @@ function drawHandles(){
 const lenInput = document.getElementById("lenInput");
 const lenbar = document.getElementById("lenbar");
 function updateHud(W, H){
-  // mode chip
-  document.getElementById("modechip").textContent = state.mode === "draw" ? "Режим: рисование" : "Режим: перемещение";
-  // length bar visible while drawing an open polygon
   const a = activeApt();
-  lenbar.classList.toggle("on", state.mode === "draw" && a && !a.closed && a.points.length >= 1);
+  // mode chip
+  document.getElementById("modechip").textContent =
+    state.mode === "draw" ? "Режим: контур" : state.mode === "partition" ? "Режим: перегородки" : "Режим: перемещение";
+  // length bar visible while drawing a footprint or a partition
+  const drawingFoot = state.mode === "draw" && a && !a.closed && a.points.length >= 1;
+  const drawingPart = state.mode === "partition" && partDraft && partDraft.points.length >= 1;
+  lenbar.classList.toggle("on", drawingFoot || drawingPart);
   // scale bar
   const barM = niceStep(110 / state.scale), px = barM * state.scale;
   document.getElementById("scaleLbl").textContent = fmt(barM) + " м";
@@ -372,6 +423,16 @@ function wallsAccordionHTML(a){
       <div class="wallgrid">${rows}</div>
     </details>`;
 }
+function partsBlockHTML(a){
+  if (!a.closed || a.points.length < 3) return "";
+  const parts = a.partitions || [];
+  let rows = "";
+  parts.forEach((p,i)=>{ rows += `<div class="partrow"><span>Перегородка ${i+1} · <b>${fmt(partLen(p))} м</b></span><button class="btn ghost rmpart" data-i="${i}" title="Удалить">✕</button></div>`; });
+  return `<div class="partsec">
+      <button class="btn small addpart">＋ Перегородка</button>
+      ${parts.length ? `<div class="partlist">${rows}</div>` : ""}
+    </div>`;
+}
 
 function renderSidebar(){
   aptList.innerHTML = "";
@@ -392,9 +453,10 @@ function renderSidebar(){
       <div class="ctrls">↻ <input type="range" class="rot" min="-180" max="180" step="1" value="${a.rot}">
         <input type="number" class="rotn" value="${a.rot}" step="1" style="width:56px">°</div>
       <div class="ctrls">◐ <input type="range" class="op" min="0.05" max="0.8" step="0.05" value="${a.opacity}"></div>
-      ${wallsAccordionHTML(a)}`;
-    // select on card click (ignore clicks inside controls / the walls accordion)
-    card.addEventListener("mousedown", e => { if (e.target.closest("input,button,summary,.walls")) return; selectApt(a.id); });
+      ${wallsAccordionHTML(a)}
+      ${partsBlockHTML(a)}`;
+    // select on card click (ignore clicks inside controls / accordions / partition section)
+    card.addEventListener("mousedown", e => { if (e.target.closest("input,button,summary,.walls,.partsec")) return; selectApt(a.id); });
     card.querySelector(".swatch input").addEventListener("input", e => { a.color = e.target.value; commit(); renderSidebar(); });
     card.querySelector(".name").addEventListener("input", e => { a.name = e.target.value; save(); });
     card.querySelector(".vis").addEventListener("change", e => { a.visible = e.target.checked; commit(); });
@@ -419,6 +481,10 @@ function renderSidebar(){
         });
       });
     }
+    // partitions wiring
+    const addp = card.querySelector(".addpart");
+    if (addp) addp.addEventListener("click", () => startPartition(a.id));
+    card.querySelectorAll(".rmpart").forEach(b => b.addEventListener("click", () => removePartition(a.id, +b.dataset.i)));
     aptList.appendChild(card);
   });
   updateStats();
@@ -460,7 +526,7 @@ function syncWalls(a){
 function newApt(){
   const color = PALETTE[state.apartments.length % PALETTE.length];
   return { id: "a"+(++idc), name: "Квартира "+(state.apartments.length+1), color,
-    visible: true, opacity: state.apartments.length ? 0.28 : 0.32, points: [], closed: false, tx: 0, ty: 0, rot: 0 };
+    visible: true, opacity: state.apartments.length ? 0.28 : 0.32, points: [], closed: false, tx: 0, ty: 0, rot: 0, partitions: [] };
 }
 function addApt(){ const a = newApt(); state.apartments.push(a); state.activeId = a.id; setMode("draw"); commit(); renderSidebar(); }
 function removeApt(id){ state.apartments = state.apartments.filter(a => a.id !== id); if (state.activeId === id) state.activeId = state.apartments.length ? state.apartments[state.apartments.length-1].id : null; commit(); renderSidebar(); }
@@ -469,11 +535,15 @@ function selectApt(id){ if (editWall && editWall.id !== id) editWall = null; sta
 function commit(){ save(); scheduleRender(); }
 
 function setMode(m){
+  let committed = false;
+  if (state.mode === "partition" && m !== "partition"){ committed = !!(partDraft && partDraft.points.length >= 2); commitDraft(); }
   state.mode = m;
   stage.className = m;
   document.getElementById("btnDraw").classList.toggle("active", m === "draw");
+  document.getElementById("btnPart").classList.toggle("active", m === "partition");
   document.getElementById("btnSelect").classList.toggle("active", m === "select");
   setHint();
+  if (committed) renderSidebar();
   commit();
 }
 function startDrawing(){
@@ -484,9 +554,13 @@ function startDrawing(){
 function setHint(){
   const h = document.getElementById("hint");
   if (state.mode === "draw"){
-    h.innerHTML = "Кликайте по сетке — ставьте углы стен. Длина каждой стены видна сразу; можно ввести точную в поле сверху и нажать <kbd>Enter</kbd>. <b>Замкнуть</b>: клик по первой точке или <kbd>Enter</kbd>. <kbd>Esc</kbd> — убрать последнюю. Держите <kbd>Shift</kbd> чтобы временно снять Орто.";
+    h.innerHTML = "Кликайте по сетке — ставьте углы <b>контура</b> квартиры. Длина стены видна сразу; точную можно ввести в поле сверху и нажать <kbd>Enter</kbd>. <b>Замкнуть</b>: клик по первой точке или <kbd>Enter</kbd>. <kbd>Esc</kbd> — убрать последнюю. <kbd>Shift</kbd> — временно снять Орто.";
+  } else if (state.mode === "partition"){
+    const a = activeApt();
+    if (!a || !a.closed) h.innerHTML = "Сначала нарисуйте <b>контур</b> квартиры (кнопка «Контур»), затем добавляйте перегородки внутри.";
+    else h.innerHTML = "Кликайте внутри активной квартиры — рисуйте <b>перегородку</b>. Точную длину — в поле сверху. <b>Готово</b>: <kbd>Enter</kbd> или двойной клик. <kbd>Esc</kbd> — убрать точку. Затем можно начать следующую.";
   } else {
-    h.innerHTML = "Клик по квартире — выбрать; <b>тащить</b> — двигать; <b>↻</b> — вращать; стрелки — сдвиг. <b>Клик по стене</b> (или аккордеон «Размеры стен» в карточке) задаёт её длину в метрах. Колесо — масштаб, перетаскивание пустого — панорама.";
+    h.innerHTML = "Клик по квартире — выбрать; <b>тащить</b> — двигать; <b>↻</b> — вращать; стрелки — сдвиг. <b>Клик по стене</b> (или аккордеон «Размеры стен») задаёт её длину. Перегородки — кнопка «＋ Перегородка» в карточке. Колесо — масштаб.";
   }
 }
 
@@ -511,6 +585,51 @@ function placeExactLength(L){
 }
 function closePoly(){ const a = activeApt(); if (!a || a.points.length < 3) return; a.closed = true; setMode("select"); commit(); renderSidebar(); }
 function undoPoint(){ const a = activeApt(); if (!a || a.closed) return; a.points.pop(); commit(); }
+
+// ----- interior partitions (drawn in the apartment's LOCAL space, so they move/rotate with it) -----
+function partDrawPoint(){
+  const a = activeApt(); if (!a) return { x:0, y:0 };
+  let p = worldToLocal(a, screenToWorld(cursor));
+  const ortho = state.ortho !== shiftHeld;            // ortho is relative to the apartment's own axes
+  if (partDraft && partDraft.points.length && ortho){
+    const last = partDraft.points[partDraft.points.length-1];
+    if (Math.abs(p.x-last.x) >= Math.abs(p.y-last.y)) p = { x:p.x, y:last.y };
+    else p = { x:last.x, y:p.y };
+  }
+  const g = state.gridSnap;
+  if (g) p = { x: Math.round(p.x/g)*g, y: Math.round(p.y/g)*g };
+  return p;
+}
+function placePartPoint(){
+  const a = activeApt(); if (!a || !a.closed) return;
+  if (!partDraft || partDraft.aptId !== a.id) partDraft = { aptId:a.id, points:[] };
+  const p = partDrawPoint();
+  if (partDraft.points.length){
+    const last = partDraft.points[partDraft.points.length-1];
+    if (dist(worldToScreen(localToWorld(a, last)), worldToScreen(localToWorld(a, p))) < 6) return;   // ignore dup / dbl-click 2nd click
+  }
+  partDraft.points.push({ x:+p.x.toFixed(4), y:+p.y.toFixed(4) });
+  commit();
+}
+function placePartExactLength(L){
+  const a = activeApt();
+  if (!a || !a.closed || !(L>0) || !partDraft || partDraft.aptId !== a.id || !partDraft.points.length) return;
+  const last = partDraft.points[partDraft.points.length-1], cur = partDrawPoint();
+  let dx=cur.x-last.x, dy=cur.y-last.y, d=Math.hypot(dx,dy);
+  if (d < 1e-9){ dx=1; dy=0; d=1; }
+  partDraft.points.push({ x:+(last.x+dx/d*L).toFixed(4), y:+(last.y+dy/d*L).toFixed(4) });
+  commit();
+}
+function commitDraft(){   // push a >=2-point draft into its apartment; drop anything shorter
+  if (!partDraft) return;
+  const a = state.apartments.find(x => x.id === partDraft.aptId);
+  if (a && partDraft.points.length >= 2) (a.partitions || (a.partitions = [])).push({ points: partDraft.points });
+  partDraft = null;
+}
+function finishPartition(){ commitDraft(); commit(); renderSidebar(); }
+function undoPartPoint(){ if (!partDraft) return; partDraft.points.pop(); if (!partDraft.points.length) partDraft = null; commit(); }
+function removePartition(id, i){ const a = state.apartments.find(x => x.id === id); if (!a || !a.partitions) return; a.partitions.splice(i, 1); commit(); renderSidebar(); }
+function startPartition(id){ if (id && id !== state.activeId) state.activeId = id; setMode("partition"); renderSidebar(); }
 
 // ============================== mouse / wheel ==============================
 function svgPos(e){ const r = svg.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
@@ -589,7 +708,7 @@ window.addEventListener("mousemove", e => {
     return;
   }
   cursor = p;
-  if (state.mode === "draw") scheduleRender();   // live rubber band
+  if (state.mode === "draw" || state.mode === "partition") scheduleRender();   // live rubber band
 });
 
 window.addEventListener("mouseup", e => {
@@ -611,12 +730,13 @@ svg.addEventListener("click", e => {
     placePoint(drawWorld());
     return;
   }
+  if (state.mode === "partition"){ placePartPoint(); return; }
   // select mode: click a wall to edit its length
   const hit = wallHitTest(cursor);
   if (hit) editWallFromCanvas(hit);
 });
 
-svg.addEventListener("dblclick", () => { if (state.mode === "draw") closePoly(); });
+svg.addEventListener("dblclick", () => { if (state.mode === "draw") closePoly(); else if (state.mode === "partition") finishPartition(); });
 
 svg.addEventListener("wheel", e => {
   e.preventDefault();
@@ -636,6 +756,9 @@ window.addEventListener("keydown", e => {
   if (state.mode === "draw"){
     if (e.key === "Enter" && document.activeElement !== lenInput){ closePoly(); e.preventDefault(); }
     else if (e.key === "Escape"){ undoPoint(); }
+  } else if (state.mode === "partition"){
+    if (e.key === "Enter" && document.activeElement !== lenInput){ finishPartition(); e.preventDefault(); }
+    else if (e.key === "Escape"){ undoPartPoint(); }
   } else {
     const a = activeApt();
     if (a && /^Arrow/.test(e.key)){
@@ -649,7 +772,13 @@ window.addEventListener("keydown", e => {
 window.addEventListener("keyup", e => { if (e.key === "Shift"){ shiftHeld = false; if (state.mode==="draw") scheduleRender(); } });
 
 lenInput.addEventListener("keydown", e => {
-  if (e.key === "Enter"){ const v = parseFloat(lenInput.value.replace(",", ".")); placeExactLength(v); lenInput.blur(); e.preventDefault(); }
+  if (e.key === "Enter"){
+    const v = parseFloat(lenInput.value.replace(",", "."));
+    if (state.mode === "partition") placePartExactLength(v); else placeExactLength(v);
+    // stop here: blur() below changes activeElement, which would otherwise let the window
+    // keydown handler also fire closePoly()/finishPartition() — a double action.
+    e.preventDefault(); e.stopPropagation(); lenInput.blur();
+  }
 });
 
 // ============================== sidebar controls ==============================
@@ -683,9 +812,11 @@ document.getElementById("btnExample").addEventListener("click", loadExample);
 function loadExample(){
   state.apartments = [
     { id:"a"+(++idc), name:"Квартира A", color:PALETTE[0], visible:true, opacity:0.30, closed:true, tx:0, ty:0, rot:0,
-      points:[ {x:0,y:0},{x:9,y:0},{x:9,y:6},{x:5.5,y:6},{x:5.5,y:4},{x:0,y:4} ] },
+      points:[ {x:0,y:0},{x:9,y:0},{x:9,y:6},{x:5.5,y:6},{x:5.5,y:4},{x:0,y:4} ],
+      partitions:[ {points:[{x:4.5,y:0},{x:4.5,y:4}]}, {points:[{x:0,y:2.5},{x:4.5,y:2.5}]} ] },
     { id:"a"+(++idc), name:"Квартира B", color:PALETTE[1], visible:true, opacity:0.28, closed:true, tx:0.5, ty:0.5, rot:0,
-      points:[ {x:0,y:0},{x:8,y:0},{x:8,y:6.5},{x:3,y:6.5},{x:3,y:4.5},{x:0,y:4.5} ] },
+      points:[ {x:0,y:0},{x:8,y:0},{x:8,y:6.5},{x:3,y:6.5},{x:3,y:4.5},{x:0,y:4.5} ],
+      partitions:[ {points:[{x:4,y:0},{x:4,y:4.5}]}, {points:[{x:0,y:2.5},{x:4,y:2.5}]} ] },
   ];
   state.activeId = state.apartments[1].id;
   state.scale = 46; state.panX = 120; state.panY = 90;
