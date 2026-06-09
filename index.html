@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Наложение планировок — сравнение квартир в реальном масштабе</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2430; }
+  #app { display: flex; height: 100vh; }
+
+  /* ---- Sidebar ---- */
+  #sidebar { width: 340px; flex: none; background: #fbfbfc; border-right: 1px solid #e4e6eb; overflow-y: auto; padding: 14px; }
+  #sidebar h1 { font-size: 15px; margin: 0 0 2px; }
+  #sidebar .sub { font-size: 11px; color: #8a909c; margin: 0 0 12px; }
+  .section { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #ececf0; }
+  .section:last-child { border-bottom: none; }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8a909c; margin-bottom: 6px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .btn { border: 1px solid #d3d6dd; background: #fff; border-radius: 7px; padding: 7px 10px; font-size: 13px; cursor: pointer; color: #1f2430; }
+  .btn:hover { background: #f0f1f4; }
+  .btn.primary { background: #2f6df6; border-color: #2f6df6; color: #fff; }
+  .btn.primary:hover { background: #245fe0; }
+  .btn.active { background: #1f2430; border-color: #1f2430; color: #fff; }
+  .btn.ghost { background: transparent; border-color: transparent; color: #8a909c; padding: 4px 6px; }
+  .btn.ghost:hover { color: #d23; background: #fbeaea; }
+  .btn.small { padding: 4px 7px; font-size: 12px; }
+  select, input[type=number], input[type=text] { border: 1px solid #d3d6dd; border-radius: 6px; padding: 5px 7px; font-size: 13px; font-family: inherit; }
+
+  /* apartment cards */
+  .apt { border: 1px solid #e4e6eb; border-radius: 9px; padding: 9px; margin-bottom: 9px; background: #fff; }
+  .apt.active { border-color: #2f6df6; box-shadow: 0 0 0 2px rgba(47,109,246,.15); }
+  .apt .top { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 18px; height: 18px; border-radius: 5px; border: 1px solid rgba(0,0,0,.15); flex: none; cursor: pointer; position: relative; overflow: hidden; }
+  .swatch input { position: absolute; inset: -6px; opacity: 0; cursor: pointer; }
+  .apt .name { flex: 1; border: none; background: transparent; font-size: 14px; font-weight: 600; padding: 2px; min-width: 0; }
+  .apt .name:focus { outline: 1px solid #d3d6dd; border-radius: 4px; }
+  .apt .stats { font-size: 12px; color: #6b7280; margin-top: 6px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .apt .stats b { color: #1f2430; font-weight: 600; }
+  .apt .ctrls { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: #6b7280; }
+  .apt .ctrls input[type=range] { flex: 1; }
+  .hint { font-size: 12px; line-height: 1.5; color: #6b7280; background: #f4f6fb; border: 1px solid #e4e9f5; border-radius: 8px; padding: 9px 11px; }
+  .hint b { color: #1f2430; }
+  kbd { background: #eceef2; border: 1px solid #d3d6dd; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; font-family: ui-monospace, monospace; }
+
+  /* ---- Stage ---- */
+  #stage { flex: 1; position: relative; background: #f5f6f8; overflow: hidden; min-width: 0; }
+  svg { width: 100%; height: 100%; display: block; }
+  #stage.draw svg { cursor: crosshair; }
+  #stage.select svg { cursor: default; }
+
+  /* HUD */
+  .hud { position: absolute; pointer-events: none; font-size: 12px; }
+  #lenbar { top: 14px; left: 50%; transform: translateX(-50%); background: rgba(31,36,48,.92); color: #fff; padding: 8px 12px; border-radius: 10px; display: none; align-items: center; gap: 9px; pointer-events: auto; box-shadow: 0 4px 16px rgba(0,0,0,.18); }
+  #lenbar.on { display: flex; }
+  #lenbar input { width: 74px; background: #fff; color: #1f2430; border: none; border-radius: 6px; padding: 5px 7px; font-size: 14px; font-weight: 600; }
+  #lenbar .muted { color: #aab2c4; }
+  #scalebar { left: 16px; bottom: 16px; color: #4b5160; }
+  #scalebar .bar { height: 8px; border: 2px solid #4b5160; border-top: none; margin-top: 3px; }
+  #modechip { right: 16px; bottom: 16px; background: #fff; border: 1px solid #e4e6eb; padding: 6px 10px; border-radius: 20px; color: #4b5160; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1>Наложение планировок</h1>
+    <p class="sub">Сравнение квартир в реальном масштабе</p>
+
+    <div class="section">
+      <div class="row">
+        <button class="btn primary" id="btnDraw" style="flex:1">✏️ Рисовать стены</button>
+        <button class="btn" id="btnSelect" style="flex:1">✋ Двигать</button>
+      </div>
+      <div class="hint" id="hint"></div>
+    </div>
+
+    <div class="section">
+      <div class="label">Квартиры</div>
+      <div id="aptList"></div>
+      <button class="btn" id="btnAdd" style="width:100%">＋ Добавить квартиру</button>
+    </div>
+
+    <div class="section">
+      <div class="label">Сетка и привязка</div>
+      <div class="row">
+        <span style="font-size:13px;flex:1">Шаг привязки</span>
+        <select id="snapSel">
+          <option value="0">выкл</option>
+          <option value="0.05">5 см</option>
+          <option value="0.1">10 см</option>
+          <option value="0.25">25 см</option>
+          <option value="0.5">50 см</option>
+          <option value="1">1 м</option>
+        </select>
+      </div>
+      <div class="row"><label style="font-size:13px"><input type="checkbox" id="orthoChk"> Прямые углы (Орто)</label></div>
+      <div class="row"><label style="font-size:13px"><input type="checkbox" id="labelChk"> Подписи длин у всех</label></div>
+    </div>
+
+    <div class="section">
+      <div class="label">Данные</div>
+      <div class="row">
+        <button class="btn small" id="btnExample">Пример</button>
+        <button class="btn small" id="btnExport">Экспорт</button>
+        <button class="btn small" id="btnImport">Импорт</button>
+        <button class="btn small" id="btnClear" style="margin-left:auto;color:#d23">Очистить</button>
+      </div>
+      <input type="file" id="fileIn" accept="application/json" style="display:none">
+      <p class="sub" style="margin:8px 0 0">Сохраняется автоматически в браузере.</p>
+    </div>
+  </div>
+
+  <div id="stage" class="draw">
+    <svg id="svg"></svg>
+    <div class="hud" id="lenbar">
+      <span class="muted">Длина стены</span>
+      <input type="text" id="lenInput" inputmode="decimal" autocomplete="off">
+      <span class="muted">м · <kbd>Enter</kbd> поставить</span>
+    </div>
+    <div class="hud" id="scalebar"><span id="scaleLbl"></span><div class="bar" id="scaleBarEl"></div></div>
+    <div class="hud" id="modechip"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ============================== helpers ==============================
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(tag, attrs){ const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+function txt(x, y, s, fill, size, anchor){
+  const t = el("text", { x, y, fill, "font-size": size, "font-family": "system-ui, sans-serif",
+    "text-anchor": anchor || "start", "paint-order": "stroke", stroke: "#fff", "stroke-width": 3, "stroke-linejoin": "round" });
+  t.textContent = s; return t;
+}
+function dist(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
+function centroid(pts){ if (!pts.length) return {x:0,y:0}; let x=0,y=0; for (const p of pts){ x+=p.x; y+=p.y; } return {x:x/pts.length, y:y/pts.length}; }
+function polyArea(pts){ let s=0; const n=pts.length; for (let i=0;i<n;i++){ const a=pts[i], b=pts[(i+1)%n]; s += a.x*b.y - b.x*a.y; } return Math.abs(s)/2; }
+function polyPerim(pts, closed){ const n=pts.length; if (n<2) return 0; let s=0; const m = closed? n : n-1; for (let i=0;i<m;i++){ s += dist(pts[i], pts[(i+1)%n]); } return s; }
+function pointInPoly(p, pts){ let inside=false; for (let i=0,j=pts.length-1;i<pts.length;j=i++){ const xi=pts[i].x,yi=pts[i].y,xj=pts[j].x,yj=pts[j].y; if (((yi>p.y)!==(yj>p.y)) && (p.x < (xj-xi)*(p.y-yi)/(yj-yi)+xi)) inside=!inside; } return inside; }
+function fmt(n){ const r = Math.round(n*100)/100; return (Object.is(r,-0)?0:r).toString(); }
+function niceStep(m){ const a=[0.1,0.2,0.25,0.5,1,2,2.5,5,10,20,25,50,100]; for (const s of a) if (s>=m) return s; return 200; }
+
+// ============================== state ==============================
+const PALETTE = ["#e8453c","#2f6df6","#1ea672","#f5a623","#9b51e0","#00a3b4","#d6308a"];
+const KEY = "plann_overlay_v1";
+let idc = 0;
+const state = {
+  scale: 46, panX: 0, panY: 0,          // screen_px = world_m * scale + pan
+  gridSnap: 0.1, ortho: true, showAll: false,
+  mode: "draw",                          // "draw" | "select"
+  apartments: [],                        // {id,name,color,visible,opacity,points:[{x,y}],closed,tx,ty,rot}
+  activeId: null,
+};
+// transient (not saved)
+let cursor = { x: 0, y: 0 };             // svg-screen coords
+let shiftHeld = false;
+let drag = null;                         // {type, ...}
+
+const stage = document.getElementById("stage");
+const svg = document.getElementById("svg");
+
+// ============================== coordinate pipeline ==============================
+// local(m) -> world(m): rotate around the polygon centroid, then translate by (tx,ty)
+function localToWorld(a, p){
+  const c = centroid(a.points), rad = a.rot * Math.PI/180;
+  const dx = p.x - c.x, dy = p.y - c.y;
+  return { x: dx*Math.cos(rad) - dy*Math.sin(rad) + c.x + a.tx,
+           y: dx*Math.sin(rad) + dy*Math.cos(rad) + c.y + a.ty };
+}
+function worldToLocal(a, w){
+  const c = centroid(a.points), rad = -a.rot * Math.PI/180;
+  const dx = w.x - c.x - a.tx, dy = w.y - c.y - a.ty;
+  return { x: dx*Math.cos(rad) - dy*Math.sin(rad) + c.x,
+           y: dx*Math.sin(rad) + dy*Math.cos(rad) + c.y };
+}
+function worldToScreen(w){ return { x: w.x*state.scale + state.panX, y: w.y*state.scale + state.panY }; }
+function screenToWorld(s){ return { x: (s.x - state.panX)/state.scale, y: (s.y - state.panY)/state.scale }; }
+function snapWorld(w){ const g = state.gridSnap; if (!g) return w; return { x: Math.round(w.x/g)*g, y: Math.round(w.y/g)*g }; }
+
+function activeApt(){ return state.apartments.find(a => a.id === state.activeId) || null; }
+
+// world point of the cursor while drawing, with ortho + grid snap applied
+function drawWorld(){
+  let w = screenToWorld(cursor);
+  const a = activeApt();
+  const ortho = state.ortho !== shiftHeld;   // Shift inverts
+  if (a && a.points.length && ortho && !a.closed){
+    const last = a.points[a.points.length-1]; // active is identity transform while drawing
+    if (Math.abs(w.x-last.x) >= Math.abs(w.y-last.y)) w = { x:w.x, y:last.y };
+    else w = { x:last.x, y:w.y };
+  }
+  return snapWorld(w);
+}
+
+// ============================== persistence ==============================
+let saveTimer = null;
+function save(){ clearTimeout(saveTimer); saveTimer = setTimeout(() => {
+  try { localStorage.setItem(KEY, JSON.stringify({ scale:state.scale, panX:state.panX, panY:state.panY,
+    gridSnap:state.gridSnap, ortho:state.ortho, showAll:state.showAll, mode:state.mode,
+    apartments:state.apartments, activeId:state.activeId, idc })); } catch(e){}
+}, 250); }
+function load(){
+  try {
+    const raw = localStorage.getItem(KEY); if (!raw) return false;
+    const d = JSON.parse(raw); Object.assign(state, {
+      scale:d.scale, panX:d.panX, panY:d.panY, gridSnap:d.gridSnap, ortho:d.ortho,
+      showAll:!!d.showAll, mode:d.mode||"select", apartments:d.apartments||[], activeId:d.activeId });
+    idc = d.idc || state.apartments.length;
+    return state.apartments.length > 0;
+  } catch(e){ return false; }
+}
+
+// ============================== rendering ==============================
+let raf = null;
+function scheduleRender(){ if (raf) return; raf = requestAnimationFrame(() => { raf = null; render(); }); }
+
+function render(){
+  const W = stage.clientWidth, H = stage.clientHeight;
+  svg.setAttribute("width", W); svg.setAttribute("height", H);
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  drawGrid(W, H);
+  for (const a of state.apartments) if (a.visible) drawApartment(a);
+  if (state.mode === "draw") drawRubber();
+  drawHandles();
+  updateHud(W, H);
+  updateStats();
+}
+
+function drawGrid(W, H){
+  const step = niceStep(72 / state.scale);
+  const tl = screenToWorld({x:0,y:0}), br = screenToWorld({x:W,y:H});
+  const g = el("g", {});
+  for (let x = Math.floor(tl.x/step)*step; x <= br.x + 1e-9; x += step){
+    const sx = x*state.scale + state.panX;
+    const major = Math.round(x/step) % 5 === 0;
+    g.appendChild(el("line", { x1:sx, y1:0, x2:sx, y2:H, stroke: major? "#cfd3da":"#e7e9ee", "stroke-width":1 }));
+    if (major) g.appendChild(txt(sx+3, 13, fmt(x)+" м", "#aab0bb", 10));
+  }
+  for (let y = Math.floor(tl.y/step)*step; y <= br.y + 1e-9; y += step){
+    const sy = y*state.scale + state.panY;
+    const major = Math.round(y/step) % 5 === 0;
+    g.appendChild(el("line", { x1:0, y1:sy, x2:W, y2:sy, stroke: major? "#cfd3da":"#e7e9ee", "stroke-width":1 }));
+    if (major) g.appendChild(txt(3, sy-3, fmt(y)+" м", "#aab0bb", 10));
+  }
+  svg.appendChild(g);
+}
+
+function lenBadge(x, y, s, color){
+  const g = el("g", {});
+  g.appendChild(txt(x, y, s, color, 12, "middle"));
+  g.lastChild.setAttribute("dominant-baseline", "middle");
+  g.lastChild.setAttribute("font-weight", "600");
+  return g;
+}
+
+function drawApartment(a){
+  const n = a.points.length;
+  const scr = a.points.map(p => worldToScreen(localToWorld(a, p)));
+  const isA = a.id === state.activeId;
+  if (n >= 2){
+    const d = scr.map((p,i)=> (i? "L":"M") + p.x.toFixed(1) + " " + p.y.toFixed(1)).join(" ") + (a.closed? " Z":"");
+    svg.appendChild(el("path", { d, fill: a.closed? a.color:"none", "fill-opacity": a.opacity,
+      stroke: a.color, "stroke-width": isA? 3.5:2.5, "stroke-linejoin":"round", "stroke-linecap":"round" }));
+  }
+  // wall length labels
+  if ((isA || state.showAll) && n >= 2){
+    const m = a.closed? n : n-1;
+    for (let i=0;i<m;i++){
+      const len = dist(a.points[i], a.points[(i+1)%n]);
+      const mid = { x:(scr[i].x+scr[(i+1)%n].x)/2, y:(scr[i].y+scr[(i+1)%n].y)/2 };
+      svg.appendChild(lenBadge(mid.x, mid.y, fmt(len)+" м", a.color));
+    }
+  }
+  // vertices of active
+  if (isA) for (const p of scr) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:4, fill:"#fff", stroke:a.color, "stroke-width":2 }));
+}
+
+function drawRubber(){
+  const a = activeApt();
+  if (!a || a.closed || !a.points.length) return;
+  const last = worldToScreen(a.points[a.points.length-1]);
+  const cur = drawWorld(), curS = worldToScreen(cur);
+  svg.appendChild(el("line", { x1:last.x, y1:last.y, x2:curS.x, y2:curS.y, stroke:a.color, "stroke-width":2, "stroke-dasharray":"6 5", opacity:.85 }));
+  svg.appendChild(el("circle", { cx:curS.x, cy:curS.y, r:4, fill:a.color }));
+  const len = dist(a.points[a.points.length-1], cur);
+  svg.appendChild(lenBadge((last.x+curS.x)/2, (last.y+curS.y)/2 - 10, fmt(len)+" м", a.color));
+  // close hint — same ortho-independent screen test as placePoint
+  if (a.points.length >= 3){
+    const first = worldToScreen(a.points[0]);
+    if (dist(cursor, first) < 14) svg.appendChild(el("circle", { cx:first.x, cy:first.y, r:8, fill:"none", stroke:a.color, "stroke-width":2 }));
+  }
+  // live length field
+  if (document.activeElement !== lenInput) lenInput.value = fmt(len);
+}
+
+function drawHandles(){
+  const a = activeApt();
+  if (state.mode !== "select" || !a || a.points.length < 2) return;
+  const c = worldToScreen(localToWorld(a, centroid(a.points)));
+  svg.appendChild(el("line", { x1:c.x-7, y1:c.y, x2:c.x+7, y2:c.y, stroke:a.color, "stroke-width":1.5 }));
+  svg.appendChild(el("line", { x1:c.x, y1:c.y-7, x2:c.x, y2:c.y+7, stroke:a.color, "stroke-width":1.5 }));
+}
+
+const lenInput = document.getElementById("lenInput");
+const lenbar = document.getElementById("lenbar");
+function updateHud(W, H){
+  // mode chip
+  document.getElementById("modechip").textContent = state.mode === "draw" ? "Режим: рисование" : "Режим: перемещение";
+  // length bar visible while drawing an open polygon
+  const a = activeApt();
+  lenbar.classList.toggle("on", state.mode === "draw" && a && !a.closed && a.points.length >= 1);
+  // scale bar
+  const barM = niceStep(110 / state.scale), px = barM * state.scale;
+  document.getElementById("scaleLbl").textContent = fmt(barM) + " м";
+  document.getElementById("scaleBarEl").style.width = px + "px";
+}
+
+// ============================== sidebar ==============================
+const aptList = document.getElementById("aptList");
+function renderSidebar(){
+  aptList.innerHTML = "";
+  if (!state.apartments.length){
+    aptList.innerHTML = '<p class="sub" style="margin:0 0 8px">Пока пусто. Нажмите «Рисовать стены» и кликайте по сетке.</p>';
+  }
+  state.apartments.forEach(a => {
+    const card = document.createElement("div");
+    card.className = "apt" + (a.id === state.activeId ? " active" : "");
+    card.innerHTML = `
+      <div class="top">
+        <span class="swatch" style="background:${a.color}"><input type="color" value="${a.color}"></span>
+        <input class="name" value="${a.name.replace(/"/g,'&quot;')}">
+        <input type="checkbox" class="vis" ${a.visible?"checked":""} title="Видимость">
+        <button class="btn ghost del" title="Удалить">✕</button>
+      </div>
+      <div class="stats"><span>Площадь: <b class="area">—</b></span><span>Периметр: <b class="peri">—</b></span><span class="open" style="color:#e8a23c"></span></div>
+      <div class="ctrls">↻ <input type="range" class="rot" min="-180" max="180" step="1" value="${a.rot}">
+        <input type="number" class="rotn" value="${a.rot}" step="1" style="width:56px">°</div>
+      <div class="ctrls">◐ <input type="range" class="op" min="0.05" max="0.8" step="0.05" value="${a.opacity}"></div>`;
+    // select on card click
+    card.addEventListener("mousedown", e => { if (e.target.closest("input,button")) return; selectApt(a.id); });
+    card.querySelector(".swatch input").addEventListener("input", e => { a.color = e.target.value; commit(); renderSidebar(); });
+    card.querySelector(".name").addEventListener("input", e => { a.name = e.target.value; save(); });
+    card.querySelector(".vis").addEventListener("change", e => { a.visible = e.target.checked; commit(); });
+    card.querySelector(".del").addEventListener("click", () => removeApt(a.id));
+    const rot = card.querySelector(".rot"), rotn = card.querySelector(".rotn");
+    rot.addEventListener("input", e => { a.rot = +e.target.value; rotn.value = a.rot; commit(); });
+    rotn.addEventListener("input", e => { a.rot = +e.target.value||0; rot.value = a.rot; commit(); });
+    card.querySelector(".op").addEventListener("input", e => { a.opacity = +e.target.value; commit(); });
+    aptList.appendChild(card);
+  });
+  updateStats();
+}
+function updateStats(){
+  // rows are in the same order as state.apartments
+  [...aptList.querySelectorAll(".apt")].forEach((card, i) => {
+    const a = state.apartments[i]; if (!a) return;
+    const area = card.querySelector(".area"), peri = card.querySelector(".peri"), open = card.querySelector(".open");
+    if (area) area.textContent = a.closed ? fmt(polyArea(a.points)) + " м²" : "—";
+    if (peri) peri.textContent = fmt(polyPerim(a.points, a.closed)) + " м";
+    if (open) open.textContent = a.closed ? "" : "контур не замкнут";
+  });
+}
+
+// ============================== apartment ops ==============================
+function newApt(){
+  const color = PALETTE[state.apartments.length % PALETTE.length];
+  return { id: "a"+(++idc), name: "Квартира "+(state.apartments.length+1), color,
+    visible: true, opacity: state.apartments.length ? 0.28 : 0.32, points: [], closed: false, tx: 0, ty: 0, rot: 0 };
+}
+function addApt(){ const a = newApt(); state.apartments.push(a); state.activeId = a.id; setMode("draw"); commit(); renderSidebar(); }
+function removeApt(id){ state.apartments = state.apartments.filter(a => a.id !== id); if (state.activeId === id) state.activeId = state.apartments.length ? state.apartments[state.apartments.length-1].id : null; commit(); renderSidebar(); }
+function selectApt(id){ state.activeId = id; commit(); renderSidebar(); }
+
+function commit(){ save(); scheduleRender(); }
+
+function setMode(m){
+  state.mode = m;
+  stage.className = m;
+  document.getElementById("btnDraw").classList.toggle("active", m === "draw");
+  document.getElementById("btnSelect").classList.toggle("active", m === "select");
+  setHint();
+  commit();
+}
+function startDrawing(){
+  const a = activeApt();
+  if (!a || a.closed) { addApt(); return; }   // addApt already sets draw mode
+  setMode("draw");
+}
+function setHint(){
+  const h = document.getElementById("hint");
+  if (state.mode === "draw"){
+    h.innerHTML = "Кликайте по сетке — ставьте углы стен. Длина каждой стены видна сразу; можно ввести точную в поле сверху и нажать <kbd>Enter</kbd>. <b>Замкнуть</b>: клик по первой точке или <kbd>Enter</kbd>. <kbd>Esc</kbd> — убрать последнюю. Держите <kbd>Shift</kbd> чтобы временно снять Орто.";
+  } else {
+    h.innerHTML = "Кликните квартиру, чтобы выбрать. <b>Тащите</b> — двигать; ползунок <b>↻</b> — вращать; стрелки — сдвиг на шаг. Так совмещаете планировки. Колесо — масштаб, перетаскивание пустого места — панорама.";
+  }
+}
+
+// ============================== drawing actions ==============================
+function placePoint(w){
+  const a = activeApt(); if (!a || a.closed) return;
+  // close when clicking near the first vertex — tested in screen space so Ortho can't pull it off target
+  if (a.points.length >= 3 && dist(cursor, worldToScreen(a.points[0])) < 12){ closePoly(); return; }
+  // drop a point landing on top of the previous one (also swallows the 2nd click of a dbl-click-to-close)
+  if (a.points.length && dist(cursor, worldToScreen(a.points[a.points.length-1])) < 6) return;
+  a.points.push({ x: +w.x.toFixed(4), y: +w.y.toFixed(4) });
+  commit();
+}
+function placeExactLength(L){
+  const a = activeApt(); if (!a || a.closed || !a.points.length || !(L>0)) return;
+  const last = a.points[a.points.length-1];
+  const cur = drawWorld();
+  let dx = cur.x - last.x, dy = cur.y - last.y, d = Math.hypot(dx, dy);
+  if (d < 1e-9){ dx = 1; dy = 0; d = 1; }              // default direction: +x
+  a.points.push({ x: +(last.x + dx/d*L).toFixed(4), y: +(last.y + dy/d*L).toFixed(4) });
+  commit();
+}
+function closePoly(){ const a = activeApt(); if (!a || a.points.length < 3) return; a.closed = true; setMode("select"); commit(); renderSidebar(); }
+function undoPoint(){ const a = activeApt(); if (!a || a.closed) return; a.points.pop(); commit(); }
+
+// ============================== mouse / wheel ==============================
+function svgPos(e){ const r = svg.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+
+svg.addEventListener("contextmenu", e => e.preventDefault());
+
+svg.addEventListener("mousedown", e => {
+  cursor = svgPos(e);
+  if (e.button === 2 || e.button === 1){ drag = { type:"pan", last: cursor }; return; }   // right/middle = pan
+  if (state.mode === "select"){
+    // hit-test top-most visible apartment
+    const wpt = screenToWorld(cursor);
+    let hit = null;
+    for (let i = state.apartments.length-1; i >= 0; i--){
+      const a = state.apartments[i];
+      if (a.visible && a.closed && a.points.length >= 3 && pointInPoly(worldToLocal(a, wpt), a.points)){ hit = a; break; }
+    }
+    if (hit){ state.activeId = hit.id; renderSidebar(); drag = { type:"move", id:hit.id, startTx:hit.tx, startTy:hit.ty, startW:wpt, moved:false }; }
+    else drag = { type:"pan", last: cursor, fromEmpty:true, moved:false };
+  }
+});
+
+window.addEventListener("mousemove", e => {
+  const p = svgPos(e);
+  if (drag){
+    drag.moved = drag.moved || Math.hypot(p.x-cursor.x, p.y-cursor.y) > 3;
+    if (drag.type === "pan"){ state.panX += p.x - drag.last.x; state.panY += p.y - drag.last.y; drag.last = p; }
+    else if (drag.type === "move"){
+      const a = state.apartments.find(x => x.id === drag.id); if (a){
+        const w = screenToWorld(p);
+        let tx = drag.startTx + (w.x - drag.startW.x), ty = drag.startTy + (w.y - drag.startW.y);
+        if (state.gridSnap){ tx = Math.round(tx/state.gridSnap)*state.gridSnap; ty = Math.round(ty/state.gridSnap)*state.gridSnap; }
+        a.tx = tx; a.ty = ty;
+      }
+    }
+    cursor = p; scheduleRender();
+    if (drag.type === "move") save();
+    return;
+  }
+  cursor = p;
+  if (state.mode === "draw") scheduleRender();   // live rubber band
+});
+
+window.addEventListener("mouseup", e => {
+  if (drag){
+    if (state.mode === "select" && drag.type === "pan" && drag.fromEmpty && !drag.moved){ state.activeId = null; renderSidebar(); }
+    const wasMove = drag.moved; drag = null;
+    if (wasMove){ suppressClick = true; }
+  }
+});
+
+let suppressClick = false;
+svg.addEventListener("click", e => {
+  if (suppressClick){ suppressClick = false; return; }
+  if (e.button !== 0) return;
+  cursor = svgPos(e);
+  if (state.mode === "draw"){
+    const a = activeApt();
+    if (!a || a.closed) addApt();           // start a fresh apartment if needed
+    placePoint(drawWorld());
+  }
+});
+
+svg.addEventListener("dblclick", () => { if (state.mode === "draw") closePoly(); });
+
+svg.addEventListener("wheel", e => {
+  e.preventDefault();
+  const p = svgPos(e); const before = screenToWorld(p);
+  const f = e.deltaY < 0 ? 1.12 : 1/1.12;
+  state.scale = Math.max(6, Math.min(400, state.scale * f));
+  state.panX = p.x - before.x * state.scale;
+  state.panY = p.y - before.y * state.scale;
+  commit();
+}, { passive: false });
+
+// ============================== keyboard ==============================
+window.addEventListener("keydown", e => {
+  if (e.key === "Shift") shiftHeld = true;
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && document.activeElement !== lenInput;
+  if (typing) return;
+  if (state.mode === "draw"){
+    if (e.key === "Enter" && document.activeElement !== lenInput){ closePoly(); e.preventDefault(); }
+    else if (e.key === "Escape"){ undoPoint(); }
+  } else {
+    const a = activeApt();
+    if (a && /^Arrow/.test(e.key)){
+      const g = state.gridSnap || 0.1;
+      if (e.key === "ArrowLeft") a.tx -= g; if (e.key === "ArrowRight") a.tx += g;
+      if (e.key === "ArrowUp") a.ty -= g; if (e.key === "ArrowDown") a.ty += g;
+      commit(); e.preventDefault();
+    }
+  }
+});
+window.addEventListener("keyup", e => { if (e.key === "Shift"){ shiftHeld = false; if (state.mode==="draw") scheduleRender(); } });
+
+lenInput.addEventListener("keydown", e => {
+  if (e.key === "Enter"){ const v = parseFloat(lenInput.value.replace(",", ".")); placeExactLength(v); lenInput.blur(); e.preventDefault(); }
+});
+
+// ============================== sidebar controls ==============================
+document.getElementById("btnDraw").addEventListener("click", startDrawing);
+document.getElementById("btnSelect").addEventListener("click", () => setMode("select"));
+document.getElementById("btnAdd").addEventListener("click", addApt);
+const snapSel = document.getElementById("snapSel");
+snapSel.addEventListener("change", e => { state.gridSnap = +e.target.value; commit(); });
+const orthoChk = document.getElementById("orthoChk");
+orthoChk.addEventListener("change", e => { state.ortho = e.target.checked; commit(); });
+const labelChk = document.getElementById("labelChk");
+labelChk.addEventListener("change", e => { state.showAll = e.target.checked; commit(); });
+
+document.getElementById("btnClear").addEventListener("click", () => {
+  if (!confirm("Удалить все квартиры?")) return;
+  state.apartments = []; state.activeId = null; commit(); renderSidebar();
+});
+document.getElementById("btnExport").addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify({ apartments: state.apartments }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob); const a = document.createElement("a");
+  a.href = url; a.download = "planirovki.json"; a.click(); URL.revokeObjectURL(url);
+});
+document.getElementById("btnImport").addEventListener("click", () => document.getElementById("fileIn").click());
+document.getElementById("fileIn").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return; const r = new FileReader();
+  r.onload = () => { try { const d = JSON.parse(r.result); if (Array.isArray(d.apartments)){ state.apartments = d.apartments; state.activeId = d.apartments.length? d.apartments[0].id : null; idc += d.apartments.length; commit(); renderSidebar(); } } catch(err){ alert("Не удалось прочитать файл"); } };
+  r.readAsText(f); e.target.value = "";
+});
+
+document.getElementById("btnExample").addEventListener("click", loadExample);
+function loadExample(){
+  state.apartments = [
+    { id:"a"+(++idc), name:"Квартира A", color:PALETTE[0], visible:true, opacity:0.30, closed:true, tx:0, ty:0, rot:0,
+      points:[ {x:0,y:0},{x:9,y:0},{x:9,y:6},{x:5.5,y:6},{x:5.5,y:4},{x:0,y:4} ] },
+    { id:"a"+(++idc), name:"Квартира B", color:PALETTE[1], visible:true, opacity:0.28, closed:true, tx:0.5, ty:0.5, rot:0,
+      points:[ {x:0,y:0},{x:8,y:0},{x:8,y:6.5},{x:3,y:6.5},{x:3,y:4.5},{x:0,y:4.5} ] },
+  ];
+  state.activeId = state.apartments[1].id;
+  state.scale = 46; state.panX = 120; state.panY = 90;
+  setMode("select"); commit(); renderSidebar();
+}
+
+// ============================== init ==============================
+function syncControls(){ snapSel.value = String(state.gridSnap); orthoChk.checked = state.ortho; labelChk.checked = state.showAll; }
+function init(){
+  const had = load();
+  if (!had){ const a = newApt(); state.apartments = [a]; state.activeId = a.id; state.mode = "draw"; state.panX = 140; state.panY = 110; }
+  syncControls(); setMode(state.mode); renderSidebar(); render();
+  window.addEventListener("resize", scheduleRender);
+}
+init();
+</script>
+</body>
+</html>
