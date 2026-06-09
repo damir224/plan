@@ -530,7 +530,7 @@ function newApt(){
 }
 function addApt(){ const a = newApt(); state.apartments.push(a); state.activeId = a.id; setMode("draw"); commit(); renderSidebar(); }
 function removeApt(id){ state.apartments = state.apartments.filter(a => a.id !== id); if (state.activeId === id) state.activeId = state.apartments.length ? state.apartments[state.apartments.length-1].id : null; commit(); renderSidebar(); }
-function selectApt(id){ if (editWall && editWall.id !== id) editWall = null; state.activeId = id; commit(); renderSidebar(); }
+function selectApt(id){ commitDraft(); if (editWall && editWall.id !== id) editWall = null; state.activeId = id; commit(); renderSidebar(); }
 
 function commit(){ save(); scheduleRender(); }
 
