@@ -39,6 +39,17 @@
   .apt .stats b { color: #1f2430; font-weight: 600; }
   .apt .ctrls { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: #6b7280; }
   .apt .ctrls input[type=range] { flex: 1; }
+  /* wall-size accordion */
+  .apt details.walls { margin-top: 9px; border-top: 1px solid #eef0f3; padding-top: 8px; }
+  .apt details.walls > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #2f6df6; list-style: none; user-select: none; }
+  .apt details.walls > summary::-webkit-details-marker { display: none; }
+  .apt details.walls > summary::before { content: "▸"; display: inline-block; width: 1em; }
+  .apt details.walls[open] > summary::before { content: "▾"; }
+  .wallnote { font-size: 11px; color: #8a909c; margin: 7px 0; line-height: 1.45; }
+  .wallgrid { display: grid; grid-template-columns: 1fr auto; gap: 5px 8px; align-items: center; }
+  .wallgrid label { font-size: 12px; color: #4b5160; }
+  .wallgrid input.wlen { width: 88px; text-align: right; }
+  .wallgrid .ro { font-size: 12px; color: #98a0ad; width: 88px; text-align: right; font-style: italic; }
   .hint { font-size: 12px; line-height: 1.5; color: #6b7280; background: #f4f6fb; border: 1px solid #e4e9f5; border-radius: 8px; padding: 9px 11px; }
   .hint b { color: #1f2430; }
   kbd { background: #eceef2; border: 1px solid #d3d6dd; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; font-family: ui-monospace, monospace; }
@@ -155,6 +166,8 @@ const state = {
 let cursor = { x: 0, y: 0 };             // svg-screen coords
 let shiftHeld = false;
 let drag = null;                         // {type, ...}
+let editWall = null;                     // {id, k} — wall highlighted / being edited
+const openWalls = new Set();             // apartment ids whose "Размеры стен" accordion is open
 
 const stage = document.getElementById("stage");
 const svg = document.getElementById("svg");
@@ -256,21 +269,45 @@ function lenBadge(x, y, s, color){
 
 function drawApartment(a){
   const n = a.points.length;
+  if (!n) return;
   const scr = a.points.map(p => worldToScreen(localToWorld(a, p)));
   const isA = a.id === state.activeId;
-  if (n >= 2){
-    const d = scr.map((p,i)=> (i? "L":"M") + p.x.toFixed(1) + " " + p.y.toFixed(1)).join(" ") + (a.closed? " Z":"");
-    svg.appendChild(el("path", { d, fill: a.closed? a.color:"none", "fill-opacity": a.opacity,
-      stroke: a.color, "stroke-width": isA? 3.5:2.5, "stroke-linejoin":"round", "stroke-linecap":"round" }));
+  const m = a.closed ? n : n - 1;        // number of wall segments
+  // fill (closed only)
+  if (a.closed && n >= 3){
+    const d = scr.map((p,i)=> (i? "L":"M") + p.x.toFixed(1) + " " + p.y.toFixed(1)).join(" ") + " Z";
+    svg.appendChild(el("path", { d, fill: a.color, "fill-opacity": a.opacity, stroke: "none" }));
+  }
+  // walls, one line each — the closing wall is dashed on the active apartment (it's the auto-derived one)
+  for (let i=0;i<m;i++){
+    const p1 = scr[i], p2 = scr[(i+1)%n];
+    const closing = a.closed && i === n-1;
+    const at = { x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y, stroke:a.color,
+      "stroke-width": isA?3.5:2.5, "stroke-linecap":"round", "stroke-linejoin":"round" };
+    if (closing && isA) at["stroke-dasharray"] = "7 5";
+    svg.appendChild(el("line", at));
+  }
+  // highlight the wall being edited
+  if (editWall && editWall.id === a.id){
+    const p1 = scr[editWall.k], p2 = scr[(editWall.k+1)%n];
+    if (p1 && p2){
+      svg.appendChild(el("line", { x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y, stroke:"#fff", "stroke-width":8, "stroke-linecap":"round", opacity:.85 }));
+      svg.appendChild(el("line", { x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y, stroke:a.color, "stroke-width":4, "stroke-linecap":"round" }));
+    }
   }
   // wall length labels
   if ((isA || state.showAll) && n >= 2){
-    const m = a.closed? n : n-1;
     for (let i=0;i<m;i++){
       const len = dist(a.points[i], a.points[(i+1)%n]);
       const mid = { x:(scr[i].x+scr[(i+1)%n].x)/2, y:(scr[i].y+scr[(i+1)%n].y)/2 };
       svg.appendChild(lenBadge(mid.x, mid.y, fmt(len)+" м", a.color));
     }
+  }
+  // "авто" tag on the active apartment's closing (derived) wall
+  if (isA && a.closed && n >= 3){
+    const mid = { x:(scr[n-1].x+scr[0].x)/2, y:(scr[n-1].y+scr[0].y)/2 };
+    const t = txt(mid.x, mid.y + 14, "авто", "#9aa0aa", 10, "middle");
+    t.setAttribute("dominant-baseline", "middle"); svg.appendChild(t);
   }
   // vertices of active
   if (isA) for (const p of scr) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:4, fill:"#fff", stroke:a.color, "stroke-width":2 }));
@@ -318,6 +355,24 @@ function updateHud(W, H){
 
 // ============================== sidebar ==============================
 const aptList = document.getElementById("aptList");
+
+function wallLen(a, i){ const n = a.points.length; return dist(a.points[i], a.points[(i+1)%n]); }
+function wallsAccordionHTML(a){
+  if (!a.closed || a.points.length < 3) return "";
+  const n = a.points.length; let rows = "";
+  for (let i=0;i<n;i++){
+    if (i === n-1)  // closing wall — derived, read-only
+      rows += `<label>Стена ${i+1} <span style="color:#aeb3bd">(замык.)</span></label><span class="ro" data-w="${i}">${fmt(wallLen(a,i))} м</span>`;
+    else
+      rows += `<label>Стена ${i+1}</label><input type="number" class="wlen" data-w="${i}" step="0.01" min="0.1" value="${fmt(wallLen(a,i))}">`;
+  }
+  return `<details class="walls"${openWalls.has(a.id)?" open":""}>
+      <summary>Размеры стен (${n})</summary>
+      <div class="wallnote">Длина стены в метрах. Последняя (<i>замыкающая</i>) стена подгоняется сама, чтобы контур остался замкнутым — на холсте она показана пунктиром с меткой «авто».</div>
+      <div class="wallgrid">${rows}</div>
+    </details>`;
+}
+
 function renderSidebar(){
   aptList.innerHTML = "";
   if (!state.apartments.length){
@@ -336,9 +391,10 @@ function renderSidebar(){
       <div class="stats"><span>Площадь: <b class="area">—</b></span><span>Периметр: <b class="peri">—</b></span><span class="open" style="color:#e8a23c"></span></div>
       <div class="ctrls">↻ <input type="range" class="rot" min="-180" max="180" step="1" value="${a.rot}">
         <input type="number" class="rotn" value="${a.rot}" step="1" style="width:56px">°</div>
-      <div class="ctrls">◐ <input type="range" class="op" min="0.05" max="0.8" step="0.05" value="${a.opacity}"></div>`;
-    // select on card click
-    card.addEventListener("mousedown", e => { if (e.target.closest("input,button")) return; selectApt(a.id); });
+      <div class="ctrls">◐ <input type="range" class="op" min="0.05" max="0.8" step="0.05" value="${a.opacity}"></div>
+      ${wallsAccordionHTML(a)}`;
+    // select on card click (ignore clicks inside controls / the walls accordion)
+    card.addEventListener("mousedown", e => { if (e.target.closest("input,button,summary,.walls")) return; selectApt(a.id); });
     card.querySelector(".swatch input").addEventListener("input", e => { a.color = e.target.value; commit(); renderSidebar(); });
     card.querySelector(".name").addEventListener("input", e => { a.name = e.target.value; save(); });
     card.querySelector(".vis").addEventListener("change", e => { a.visible = e.target.checked; commit(); });
@@ -347,6 +403,22 @@ function renderSidebar(){
     rot.addEventListener("input", e => { a.rot = +e.target.value; rotn.value = a.rot; commit(); });
     rotn.addEventListener("input", e => { a.rot = +e.target.value||0; rot.value = a.rot; commit(); });
     card.querySelector(".op").addEventListener("input", e => { a.opacity = +e.target.value; commit(); });
+    // walls accordion wiring
+    const det = card.querySelector("details.walls");
+    if (det){
+      det.addEventListener("toggle", () => { if (det.open) openWalls.add(a.id); else openWalls.delete(a.id); });
+      card.querySelectorAll("input.wlen").forEach(inp => {
+        const k = +inp.dataset.w;
+        inp.addEventListener("focus", () => { editWall = { id:a.id, k }; scheduleRender(); });
+        inp.addEventListener("blur",  () => { if (editWall && editWall.id===a.id && editWall.k===k){ editWall = null; scheduleRender(); } });
+        inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
+        inp.addEventListener("change", () => {
+          const v = parseFloat(inp.value.replace(",", "."));
+          if (setWallLength(a, k, v)){ commit(); syncWalls(a); }
+          else inp.value = fmt(wallLen(a, k));
+        });
+      });
+    }
     aptList.appendChild(card);
   });
   updateStats();
@@ -362,6 +434,28 @@ function updateStats(){
   });
 }
 
+// set wall k (0..n-2) to exact length L by rigidly shifting the tail (k+1..n-1).
+// All other walls keep their length+angle; the closing wall (n-1 -> 0) re-closes the loop.
+function setWallLength(a, k, L){
+  const n = a.points.length;
+  if (!(L > 0) || k < 0 || k >= n-1) return false;     // closing wall is derived, not editable
+  const p0 = a.points[k], p1 = a.points[k+1];
+  let dx = p1.x - p0.x, dy = p1.y - p0.y, d = Math.hypot(dx, dy);
+  if (d < 1e-9) return false;                            // zero-length wall: no direction to extend
+  const c0 = a.rot ? centroid(a.points) : null;          // pin the rotation pivot if rotated
+  const ddx = (p0.x + dx/d*L) - p1.x, ddy = (p0.y + dy/d*L) - p1.y;
+  for (let i = k+1; i < n; i++) a.points[i] = { x: +(a.points[i].x+ddx).toFixed(4), y: +(a.points[i].y+ddy).toFixed(4) };
+  if (c0){ const c1 = centroid(a.points); a.tx += c0.x - c1.x; a.ty += c0.y - c1.y; }   // keep world-centroid fixed
+  return true;
+}
+// refresh one card's wall fields + closing length + stats in place (no rebuild → keeps focus/open state)
+function syncWalls(a){
+  const card = [...aptList.querySelectorAll(".apt")][state.apartments.indexOf(a)]; if (!card) return;
+  card.querySelectorAll("input.wlen").forEach(inp => { if (document.activeElement !== inp) inp.value = fmt(wallLen(a, +inp.dataset.w)); });
+  const ro = card.querySelector(".wallgrid .ro"); if (ro) ro.textContent = fmt(wallLen(a, +ro.dataset.w)) + " м";
+  updateStats();
+}
+
 // ============================== apartment ops ==============================
 function newApt(){
   const color = PALETTE[state.apartments.length % PALETTE.length];
@@ -370,7 +464,7 @@ function newApt(){
 }
 function addApt(){ const a = newApt(); state.apartments.push(a); state.activeId = a.id; setMode("draw"); commit(); renderSidebar(); }
 function removeApt(id){ state.apartments = state.apartments.filter(a => a.id !== id); if (state.activeId === id) state.activeId = state.apartments.length ? state.apartments[state.apartments.length-1].id : null; commit(); renderSidebar(); }
-function selectApt(id){ state.activeId = id; commit(); renderSidebar(); }
+function selectApt(id){ if (editWall && editWall.id !== id) editWall = null; state.activeId = id; commit(); renderSidebar(); }
 
 function commit(){ save(); scheduleRender(); }
 
@@ -392,7 +486,7 @@ function setHint(){
   if (state.mode === "draw"){
     h.innerHTML = "Кликайте по сетке — ставьте углы стен. Длина каждой стены видна сразу; можно ввести точную в поле сверху и нажать <kbd>Enter</kbd>. <b>Замкнуть</b>: клик по первой точке или <kbd>Enter</kbd>. <kbd>Esc</kbd> — убрать последнюю. Держите <kbd>Shift</kbd> чтобы временно снять Орто.";
   } else {
-    h.innerHTML = "Кликните квартиру, чтобы выбрать. <b>Тащите</b> — двигать; ползунок <b>↻</b> — вращать; стрелки — сдвиг на шаг. Так совмещаете планировки. Колесо — масштаб, перетаскивание пустого места — панорама.";
+    h.innerHTML = "Клик по квартире — выбрать; <b>тащить</b> — двигать; <b>↻</b> — вращать; стрелки — сдвиг. <b>Клик по стене</b> (или аккордеон «Размеры стен» в карточке) задаёт её длину в метрах. Колесо — масштаб, перетаскивание пустого — панорама.";
   }
 }
 
@@ -421,21 +515,59 @@ function undoPoint(){ const a = activeApt(); if (!a || a.closed) return; a.point
 // ============================== mouse / wheel ==============================
 function svgPos(e){ const r = svg.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 
+function segDistScreen(p, a, b){
+  const vx=b.x-a.x, vy=b.y-a.y, wx=p.x-a.x, wy=p.y-a.y;
+  const c1=vx*wx+vy*wy; if (c1<=0) return Math.hypot(wx, wy);
+  const c2=vx*vx+vy*vy; if (c2<=c1) return Math.hypot(p.x-b.x, p.y-b.y);
+  const t=c1/c2; return Math.hypot(p.x-(a.x+t*vx), p.y-(a.y+t*vy));
+}
+// nearest wall under a screen point — prefers the ACTIVE apartment (plans overlap!), then topmost
+function wallHitTest(s){
+  const TH = 8;
+  const tryApt = (a) => {
+    if (!a || !a.visible || !a.closed || a.points.length < 3) return null;
+    const n = a.points.length, scr = a.points.map(p => worldToScreen(localToWorld(a, p)));
+    let best = null, bd = TH;
+    for (let i=0;i<n;i++){ const d = segDistScreen(s, scr[i], scr[(i+1)%n]); if (d < bd){ bd = d; best = { id:a.id, k:i }; } }
+    return best;
+  };
+  const act = tryApt(activeApt()); if (act) return act;
+  for (let i = state.apartments.length-1; i >= 0; i--){ const h = tryApt(state.apartments[i]); if (h) return h; }
+  return null;
+}
+// click a wall on canvas → select apartment, open its accordion, focus that wall's input
+function editWallFromCanvas(hit){
+  const a = state.apartments.find(x => x.id === hit.id); if (!a) return;
+  state.activeId = hit.id; editWall = { id:hit.id, k:hit.k }; openWalls.add(hit.id);
+  renderSidebar(); scheduleRender();
+  const card = [...aptList.querySelectorAll(".apt")][state.apartments.indexOf(a)]; if (!card) return;
+  const inp = card.querySelector(`input.wlen[data-w="${hit.k}"]`);
+  if (inp){ inp.focus(); inp.select(); inp.scrollIntoView({ block:"nearest" }); }
+  else { const det = card.querySelector("details.walls"); if (det) det.open = true; card.scrollIntoView({ block:"nearest" }); }
+}
+
 svg.addEventListener("contextmenu", e => e.preventDefault());
 
 svg.addEventListener("mousedown", e => {
   cursor = svgPos(e);
   if (e.button === 2 || e.button === 1){ drag = { type:"pan", last: cursor }; return; }   // right/middle = pan
   if (state.mode === "select"){
-    // hit-test top-most visible apartment
     const wpt = screenToWorld(cursor);
+    // a wall under the cursor wins over polygon reselection (active-preferred) — so clicking a
+    // wall in an overlap stays on the active plan instead of jumping to the topmost one.
+    const wallHit = wallHitTest(cursor);
     let hit = null;
-    for (let i = state.apartments.length-1; i >= 0; i--){
-      const a = state.apartments[i];
-      if (a.visible && a.closed && a.points.length >= 3 && pointInPoly(worldToLocal(a, wpt), a.points)){ hit = a; break; }
+    if (wallHit){ hit = state.apartments.find(a => a.id === wallHit.id); }
+    else {
+      for (let i = state.apartments.length-1; i >= 0; i--){
+        const a = state.apartments[i];
+        if (a.visible && a.closed && a.points.length >= 3 && pointInPoly(worldToLocal(a, wpt), a.points)){ hit = a; break; }
+      }
     }
-    if (hit){ state.activeId = hit.id; renderSidebar(); drag = { type:"move", id:hit.id, startTx:hit.tx, startTy:hit.ty, startW:wpt, moved:false }; }
-    else drag = { type:"pan", last: cursor, fromEmpty:true, moved:false };
+    if (hit){
+      if (state.activeId !== hit.id){ state.activeId = hit.id; renderSidebar(); }
+      drag = { type:"move", id:hit.id, startTx:hit.tx, startTy:hit.ty, startW:wpt, moved:false };
+    } else drag = { type:"pan", last: cursor, fromEmpty:true, moved:false };
   }
 });
 
@@ -477,7 +609,11 @@ svg.addEventListener("click", e => {
     const a = activeApt();
     if (!a || a.closed) addApt();           // start a fresh apartment if needed
     placePoint(drawWorld());
+    return;
   }
+  // select mode: click a wall to edit its length
+  const hit = wallHitTest(cursor);
+  if (hit) editWallFromCanvas(hit);
 });
 
 svg.addEventListener("dblclick", () => { if (state.mode === "draw") closePoly(); });
