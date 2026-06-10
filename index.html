@@ -79,6 +79,11 @@
   #scalebar { left: 16px; bottom: 16px; color: #4b5160; }
   #scalebar .bar { height: 8px; border: 2px solid #4b5160; border-top: none; margin-top: 3px; }
   #modechip { right: 16px; bottom: 16px; background: #fff; border: 1px solid #e4e6eb; padding: 6px 10px; border-radius: 20px; color: #4b5160; }
+  /* [slice-4: canvas-input] free-floating length editor pinned at a wall's dimension label */
+  #wallInput { position: absolute; display: none; width: 64px; transform: translate(-50%, -50%);
+    background: #fff; color: #1f2430; border: 2px solid #2f6df6; border-radius: 6px;
+    padding: 3px 5px; font-size: 13px; font-weight: 600; text-align: center; font-family: inherit;
+    box-shadow: 0 3px 12px rgba(0,0,0,.22); z-index: 5; }
 </style>
 </head>
 <body>
@@ -141,6 +146,7 @@
     </div>
     <div class="hud" id="scalebar"><span id="scaleLbl"></span><div class="bar" id="scaleBarEl"></div></div>
     <div class="hud" id="modechip"></div>
+    <input type="text" id="wallInput" inputmode="decimal" autocomplete="off"><!-- [slice-4: canvas-input] -->
   </div>
 </div>
 
@@ -178,6 +184,7 @@ let cursor = { x: 0, y: 0 };             // svg-screen coords
 let shiftHeld = false;
 let drag = null;                         // {type, ...}
 let editWall = null;                     // {id, k} — wall highlighted / being edited
+let wallInput = null;                     // [slice-4: canvas-input] {id, k} — wall whose on-canvas length input is open (null = closed)
 const openWalls = new Set();             // apartment ids whose "Размеры стен" accordion is open
 let partDraft = null;                    // {aptId, points:[local]} — interior partition being drawn
 let lenInputDirty = false;               // [slice-2: precision] true once the user edits #lenInput; cleared on every auto-fill
@@ -252,6 +259,17 @@ function render(){
   drawHandles();
   updateHud(W, H);
   updateStats();
+  repositionCanvasInput();   // [slice-4: canvas-input] keep an open length input pinned to its wall under pan/zoom/move
+}
+
+// [slice-4: canvas-input] re-pin the open on-canvas input to its wall's label; close if the wall is gone
+function repositionCanvasInput(){
+  if (!wallInput) return;
+  const a = state.apartments.find(x => x.id === wallInput.id);
+  if (!a || !a.closed || wallInput.k >= a.points.length - 1){ if (canvasInputHandlers) canvasInputHandlers.cancel(); return; }
+  const mid = wallLabelScreen(a, wallInput.k);
+  wallInputEl.style.left = mid.x + "px";
+  wallInputEl.style.top  = mid.y + "px";
 }
 
 function drawGrid(W, H){
@@ -536,6 +554,7 @@ function selectApt(id){ commitDraft(); if (editWall && editWall.id !== id) editW
 function commit(){ save(); scheduleRender(); }
 
 function setMode(m){
+  if (wallInput && canvasInputHandlers) canvasInputHandlers.cancel();   // [slice-4: canvas-input] drop a floating editor on mode change
   let committed = false;
   if (state.mode === "partition" && m !== "partition"){ committed = !!(partDraft && partDraft.points.length >= 2); commitDraft(); }
   lenInputDirty = false;   // [slice-2: precision] don't carry an edit across modes
@@ -667,15 +686,65 @@ function wallHitTest(s){
   for (let i = state.apartments.length-1; i >= 0; i--){ const h = tryApt(state.apartments[i]); if (h) return h; }
   return null;
 }
-// click a wall on canvas → select apartment, open its accordion, focus that wall's input
+// [slice-4: canvas-input] reusable on-canvas editor pinned at a screen point.
+// onApply(value)/onCancel() are called with the raw string; the caller parses & applies.
+// Enter calls e.preventDefault()+stopPropagation() so the window keydown can't ALSO fire
+// (closePoly/finishPartition/arrows) — same double-action guard as #lenInput. blur applies.
+const wallInputEl = document.getElementById("wallInput");
+let canvasInputHandlers = null;            // {apply, cancel} for the currently-open input
+function openCanvasInput({ x, y, value, width, onApply, onCancel }){
+  closeCanvasInput();                       // never stack two editors
+  wallInputEl.style.left = x + "px";
+  wallInputEl.style.top  = y + "px";
+  if (width) wallInputEl.style.width = width + "px";
+  wallInputEl.value = value;
+  wallInputEl.style.display = "block";
+  let done = false;
+  const finish = (fn) => { if (done) return; done = true; const v = wallInputEl.value; closeCanvasInput(); if (fn) fn(v); };
+  canvasInputHandlers = {
+    apply:  () => finish(onApply),
+    cancel: () => finish(onCancel),
+  };
+  wallInputEl.focus(); wallInputEl.select();
+}
+function closeCanvasInput(){                 // hide the element + drop handlers (generic, idempotent)
+  canvasInputHandlers = null;
+  wallInputEl.style.display = "none";
+}
+// position of wall k's dimension label in screen px (same midpoint drawApartment labels use)
+function wallLabelScreen(a, k){
+  const n = a.points.length;
+  const p1 = worldToScreen(localToWorld(a, a.points[k]));
+  const p2 = worldToScreen(localToWorld(a, a.points[(k+1)%n]));
+  return { x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2 };
+}
+wallInputEl.addEventListener("keydown", e => {
+  if (e.key === "Enter"){ e.preventDefault(); e.stopPropagation(); if (canvasInputHandlers) canvasInputHandlers.apply(); }
+  else if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); if (canvasInputHandlers) canvasInputHandlers.cancel(); }
+});
+wallInputEl.addEventListener("blur", () => { if (canvasInputHandlers) canvasInputHandlers.apply(); });
+
+// [slice-4: canvas-input] click a wall (select mode) → open a length input ON CANVAS at its
+// dimension label. Enter/blur apply via setWallLength (rigid tail-shift + centroid pin), Esc
+// cancels. Still selects the apartment; the sidebar accordion stays a synced read-through
+// overview (no forced focus-into-sidebar). The closing wall (n-1) is «авто» — no input.
 function editWallFromCanvas(hit){
   const a = state.apartments.find(x => x.id === hit.id); if (!a) return;
-  state.activeId = hit.id; editWall = { id:hit.id, k:hit.k }; openWalls.add(hit.id);
-  renderSidebar(); scheduleRender();
-  const card = [...aptList.querySelectorAll(".apt")][state.apartments.indexOf(a)]; if (!card) return;
-  const inp = card.querySelector(`input.wlen[data-w="${hit.k}"]`);
-  if (inp){ inp.focus(); inp.select(); inp.scrollIntoView({ block:"nearest" }); }
-  else { const det = card.querySelector("details.walls"); if (det) det.open = true; card.scrollIntoView({ block:"nearest" }); }
+  if (state.activeId !== hit.id){ state.activeId = hit.id; renderSidebar(); }
+  if (hit.k === a.points.length - 1) return;     // closing wall is derived/read-only — no editor
+  const clearEdit = () => { wallInput = null; editWall = null; scheduleRender(); };  // slice-4 highlight/track state
+  const mid = wallLabelScreen(a, hit.k);
+  openCanvasInput({
+    x: mid.x, y: mid.y, value: fmt(wallLen(a, hit.k)),
+    onApply: (raw) => {
+      clearEdit();
+      const v = parseFloat(raw.replace(",", "."));
+      if (setWallLength(a, hit.k, v)){ commit(); syncWalls(a); }   // REUSE: rigid tail-shift + centroid pin
+    },
+    onCancel: clearEdit,
+  });
+  wallInput = { id:hit.id, k:hit.k }; editWall = { id:hit.id, k:hit.k };  // set AFTER open() so its reset doesn't clobber
+  scheduleRender();
 }
 
 svg.addEventListener("contextmenu", e => e.preventDefault());
