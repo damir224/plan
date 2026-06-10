@@ -237,6 +237,7 @@ let spaceHeld = false;                    // [slice-8: view] holding Space = pan
 let drag = null;                         // {type, ...}
 let editWall = null;                     // {id, k} — wall highlighted / being edited
 let wallInput = null;                     // [slice-4: canvas-input] {id, k} — wall whose on-canvas length input is open (null = closed)
+let partSegInput = null;                  // [slice-4b/#8] {id, pi, si} — partition segment whose on-canvas length input is open
 const openWalls = new Set();             // apartment ids whose "Размеры стен" accordion is open
 let partDraft = null;                    // {aptId, points:[local]} — interior partition being drawn
 let lenInputDirty = false;               // [slice-2: precision] true once the user edits #lenInput; cleared on every auto-fill
@@ -355,14 +356,20 @@ function render(){
   repositionCanvasInput();   // [slice-4: canvas-input] keep an open length input pinned to its wall under pan/zoom/move
 }
 
-// [slice-4: canvas-input] re-pin the open on-canvas input to its wall's label; close if the wall is gone
+// [slice-4: canvas-input] re-pin the open on-canvas input to its label; close if the target is gone
 function repositionCanvasInput(){
-  if (!wallInput) return;
-  const a = state.apartments.find(x => x.id === wallInput.id);
-  if (!a || !a.closed || wallInput.k >= a.points.length - 1){ if (canvasInputHandlers) canvasInputHandlers.cancel(); return; }
-  const mid = wallLabelScreen(a, wallInput.k);
-  wallInputEl.style.left = mid.x + "px";
-  wallInputEl.style.top  = mid.y + "px";
+  if (wallInput){
+    const a = state.apartments.find(x => x.id === wallInput.id);
+    if (!a || !a.closed || wallInput.k >= a.points.length - 1){ if (canvasInputHandlers) canvasInputHandlers.cancel(); return; }
+    const mid = wallLabelScreen(a, wallInput.k);
+    wallInputEl.style.left = mid.x + "px"; wallInputEl.style.top = mid.y + "px";
+  } else if (partSegInput){                    // [slice-4b/#8] track a partition-segment editor
+    const a = state.apartments.find(x => x.id === partSegInput.id);
+    const part = a && (a.partitions || [])[partSegInput.pi];
+    if (!a || !part || partSegInput.si >= part.points.length - 1){ if (canvasInputHandlers) canvasInputHandlers.cancel(); return; }
+    const mid = partSegLabelScreen(a, partSegInput.pi, partSegInput.si);
+    wallInputEl.style.left = mid.x + "px"; wallInputEl.style.top = mid.y + "px";
+  }
 }
 
 function drawGrid(W, H){
@@ -698,7 +705,7 @@ function selectApt(id){ commitDraft(); if (editWall && editWall.id !== id) editW
 function commit(){ save(); scheduleRender(); }
 
 function setMode(m){
-  if (wallInput && canvasInputHandlers) canvasInputHandlers.cancel();   // [slice-4: canvas-input] drop a floating editor on mode change
+  if (canvasInputHandlers) canvasInputHandlers.cancel();   // [slice-4: canvas-input] drop any floating editor (wall/partition/offset) on mode change
   let committed = false;
   if (state.mode === "partition" && m !== "partition"){ committed = !!(partDraft && partDraft.points.length >= 2); commitDraft(); }
   lenInputDirty = false;   // [slice-2: precision] don't carry an edit across modes
@@ -942,6 +949,57 @@ function editWallFromCanvas(hit){
   scheduleRender();
 }
 
+// [slice-4b / #8] partition segment length edit on canvas — same opener as walls.
+// Rigid tail-shift of the open polyline: points after si move by the segment-direction delta, so
+// the angles and lengths of the remaining segments are preserved. LOCAL coords → transform-invariant;
+// no centroid pin (the footprint, hence the rotation pivot, is untouched).
+function setPartSegLength(a, pi, si, L){
+  const part = (a.partitions || [])[pi]; if (!part) return false;
+  const pts = part.points;
+  if (si < 0 || si >= pts.length - 1 || !(L > 0)) return false;
+  const p0 = pts[si], p1 = pts[si+1];
+  let dx = p1.x - p0.x, dy = p1.y - p0.y, d = Math.hypot(dx, dy);
+  if (d < 1e-9) return false;                          // zero-length segment: no direction
+  const ddx = (p0.x + dx/d*L) - p1.x, ddy = (p0.y + dy/d*L) - p1.y;
+  for (let i = si+1; i < pts.length; i++) pts[i] = { x: +(pts[i].x+ddx).toFixed(4), y: +(pts[i].y+ddy).toFixed(4) };
+  return true;
+}
+function partSegLabelScreen(a, pi, si){
+  const pts = a.partitions[pi].points;
+  const p1 = worldToScreen(localToWorld(a, pts[si])), p2 = worldToScreen(localToWorld(a, pts[si+1]));
+  return { x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2 };
+}
+// nearest partition segment under a screen point — ACTIVE apartment only (mirrors wallHitTest's active preference)
+function partSegHitTest(s){
+  const a = activeApt(); if (!a || !a.visible) return null;
+  const parts = a.partitions || []; const TH = 8;
+  let best = null, bd = TH;
+  for (let pi=0; pi<parts.length; pi++){
+    const scr = parts[pi].points.map(p => worldToScreen(localToWorld(a, p)));
+    for (let si=0; si<scr.length-1; si++){ const d = segDistScreen(s, scr[si], scr[si+1]); if (d < bd){ bd = d; best = { id:a.id, pi, si }; } }
+  }
+  return best;
+}
+function editPartSegFromCanvas(ph){
+  const a = activeApt(); if (!a || a.id !== ph.id) return;
+  const part = (a.partitions || [])[ph.pi]; if (!part) return;
+  const clear = () => { partSegInput = null; scheduleRender(); };
+  const mid = partSegLabelScreen(a, ph.pi, ph.si);
+  openCanvasInput({
+    x: mid.x, y: mid.y, value: fmt(dist(part.points[ph.si], part.points[ph.si+1])),
+    onApply: (raw) => {
+      clear();
+      const v = parseFloat(raw.replace(",", "."));
+      beginGesture();                                   // [slice-6: undo] one step per segment edit
+      if (setPartSegLength(a, ph.pi, ph.si, v)){ commit(); renderSidebar(); }
+      commitGesture();
+    },
+    onCancel: clear,
+  });
+  partSegInput = { id:ph.id, pi:ph.pi, si:ph.si };
+  scheduleRender();
+}
+
 svg.addEventListener("contextmenu", e => e.preventDefault());
 
 svg.addEventListener("mousedown", e => {
@@ -954,8 +1012,12 @@ svg.addEventListener("mousedown", e => {
     // a wall under the cursor wins over polygon reselection (active-preferred) — so clicking a
     // wall in an overlap stays on the active plan instead of jumping to the topmost one.
     const wallHit = wallHitTest(cursor);
+    // [slice-4b/#8] a partition segment of the ACTIVE apartment also keeps the active plan (active-preferred,
+    // like walls) — so clicking its partition in an overlap zone doesn't jump to the topmost apartment.
+    const partHit = wallHit ? null : partSegHitTest(cursor);
     let hit = null;
     if (wallHit){ hit = state.apartments.find(a => a.id === wallHit.id); }
+    else if (partHit){ hit = activeApt(); }
     else {
       for (let i = state.apartments.length-1; i >= 0; i--){
         const a = state.apartments[i];
@@ -1047,9 +1109,11 @@ svg.addEventListener("click", e => {
     return;
   }
   if (state.mode === "partition"){ placePartPoint(); return; }
-  // select mode: click a wall to edit its length
+  // select mode: click a wall to edit its length (active-preferred); else a partition segment (#8)
   const hit = wallHitTest(cursor);
-  if (hit) editWallFromCanvas(hit);
+  if (hit){ editWallFromCanvas(hit); return; }
+  const ph = partSegHitTest(cursor);            // [slice-4b/#8] partition segment label → on-canvas length edit
+  if (ph) editPartSegFromCanvas(ph);
 });
 
 svg.addEventListener("dblclick", () => { if (state.mode === "draw") closePoly(); else if (state.mode === "partition") finishPartition(); });
