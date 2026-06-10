@@ -84,6 +84,11 @@
     background: #fff; color: #1f2430; border: 2px solid #2f6df6; border-radius: 6px;
     padding: 3px 5px; font-size: 13px; font-weight: 600; text-align: center; font-family: inherit;
     box-shadow: 0 3px 12px rgba(0,0,0,.22); z-index: 5; }
+  /* [slice-8: view] zoom + fit-all controls */
+  #viewctrl { right: 16px; top: 16px; display: flex; flex-direction: column; gap: 6px; pointer-events: auto; align-items: stretch; }
+  #viewctrl .btn { background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.12); text-align: center; }
+  #viewctrl #btnZoomIn, #viewctrl #btnZoomOut { font-size: 16px; line-height: 1; padding: 5px 0; }
+  #stage.spacepan svg { cursor: grab; }
 </style>
 </head>
 <body>
@@ -147,6 +152,12 @@
     <div class="hud" id="scalebar"><span id="scaleLbl"></span><div class="bar" id="scaleBarEl"></div></div>
     <div class="hud" id="modechip"></div>
     <input type="text" id="wallInput" inputmode="decimal" autocomplete="off"><!-- [slice-4: canvas-input] -->
+    <!-- [slice-8: view] zoom + fit-all HUD controls -->
+    <div class="hud" id="viewctrl">
+      <button class="btn small" id="btnZoomIn" title="Приблизить">＋</button>
+      <button class="btn small" id="btnZoomOut" title="Отдалить">−</button>
+      <button class="btn small" id="btnFit" title="Вписать всё">Вписать</button>
+    </div>
   </div>
 </div>
 
@@ -186,6 +197,7 @@ let altHeld = false;                     // [slice-3: snap] Alt suppresses line+
 // [slice-3: snap] transient snap state for the partition vertex being drawn (one-shot, never stored on the point):
 // { host:{kind:'wall'|'part', seg:[A,B] in LOCAL}, point:{x,y} LOCAL, offsetLeft, offsetRight } | null
 let partSnap = null;
+let spaceHeld = false;                    // [slice-8: view] holding Space = pan in any mode
 let drag = null;                         // {type, ...}
 let editWall = null;                     // {id, k} — wall highlighted / being edited
 let wallInput = null;                     // [slice-4: canvas-input] {id, k} — wall whose on-canvas length input is open (null = closed)
@@ -866,6 +878,8 @@ svg.addEventListener("contextmenu", e => e.preventDefault());
 
 svg.addEventListener("mousedown", e => {
   cursor = svgPos(e);
+  // [slice-8: view] Space + left drag = pan in ANY mode (gate before the mode branches so no point/select happens)
+  if (spaceHeld && e.button === 0){ drag = { type:"pan", last: cursor, moved:false, space:true }; return; }
   if (e.button === 2 || e.button === 1){ drag = { type:"pan", last: cursor }; return; }   // right/middle = pan
   if (state.mode === "select"){
     const wpt = screenToWorld(cursor);
@@ -912,9 +926,9 @@ window.addEventListener("mousemove", e => {
 window.addEventListener("mouseup", e => {
   if (drag){
     if (state.mode === "select" && drag.type === "pan" && drag.fromEmpty && !drag.moved){ state.activeId = null; renderSidebar(); }
-    const wasMove = drag.moved, wasMoveDrag = drag.type === "move"; drag = null;
+    const wasMove = drag.moved, wasMoveDrag = drag.type === "move", wasSpace = drag.space; drag = null;
     if (wasMoveDrag) commitGesture();   // [slice-6: undo] one undo step per move-drag (no-op if it didn't move)
-    if (wasMove){ suppressClick = true; }
+    if (wasMove || wasSpace){ suppressClick = true; }   // [slice-8: view] also suppress click after a space-pan with no movement
   }
 });
 
@@ -937,18 +951,50 @@ svg.addEventListener("click", e => {
 
 svg.addEventListener("dblclick", () => { if (state.mode === "draw") closePoly(); else if (state.mode === "partition") finishPartition(); });
 
-svg.addEventListener("wheel", e => {
-  e.preventDefault();
-  const p = svgPos(e); const before = screenToWorld(p);
-  const f = e.deltaY < 0 ? 1.12 : 1/1.12;
-  state.scale = Math.max(6, Math.min(400, state.scale * f));
+// [slice-8: view] zoom about a fixed screen point, keeping the world point under it stationary
+function zoomBy(factor, centerScreenPt){
+  const p = centerScreenPt || { x: stage.clientWidth/2, y: stage.clientHeight/2 };
+  const before = screenToWorld(p);
+  state.scale = Math.max(6, Math.min(400, state.scale * factor));
   state.panX = p.x - before.x * state.scale;
   state.panY = p.y - before.y * state.scale;
   commit();
+}
+// [slice-8: view] frame all visible apartments (footprints + partitions) with a margin
+function fitAll(){
+  const W = stage.clientWidth, H = stage.clientHeight;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, has = false;
+  const acc = (p) => { if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y; if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y; has = true; };
+  for (const a of state.apartments){
+    if (!a.visible || !a.points.length) continue;
+    for (const p of a.points) acc(localToWorld(a, p));
+    for (const part of (a.partitions || [])) for (const p of part.points) acc(localToWorld(a, p));
+  }
+  if (!has) return;                                  // nothing visible — no-op
+  const bw = Math.max(maxX - minX, 1e-3), bh = Math.max(maxY - minY, 1e-3);
+  const pad = 0.10;                                  // 10% margin around the bbox
+  let s = Math.min(W / (bw * (1 + 2*pad)), H / (bh * (1 + 2*pad)));
+  if (!isFinite(s) || s <= 0) s = state.scale;
+  state.scale = Math.max(6, Math.min(400, s));
+  state.panX = W/2 - (minX + maxX)/2 * state.scale;  // center the bbox in the stage
+  state.panY = H/2 - (minY + maxY)/2 * state.scale;
+  commit();
+}
+
+svg.addEventListener("wheel", e => {
+  e.preventDefault();
+  zoomBy(e.deltaY < 0 ? 1.12 : 1/1.12, svgPos(e));   // [slice-8: view] factored into zoomBy
 }, { passive: false });
 
 // ============================== keyboard ==============================
 window.addEventListener("keydown", e => {
+  // [slice-8: view] Space = hold-to-pan, unless typing in a field (then it must type a space)
+  if (e.code === "Space"){
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;   // let the space type
+    if (!spaceHeld){ spaceHeld = true; stage.classList.add("spacepan"); }
+    e.preventDefault();                                                              // stop page scroll
+    return;
+  }
   if (e.key === "Shift") shiftHeld = true;
   if (e.key === "Alt"){ altHeld = true; if (state.mode === "partition") scheduleRender(); }   // [slice-3: snap] Alt suppresses snapping
   // [slice-6: undo] Cmd/Ctrl+Z = undo, +Shift = redo. Cmd and Ctrl are equivalent.
@@ -985,6 +1031,7 @@ window.addEventListener("keydown", e => {
 window.addEventListener("keyup", e => {
   if (e.key === "Shift"){ shiftHeld = false; if (state.mode==="draw") scheduleRender(); }
   if (e.key === "Alt"){ altHeld = false; if (state.mode === "partition") scheduleRender(); }   // [slice-3: snap]
+  if (e.code === "Space"){ spaceHeld = false; stage.classList.remove("spacepan"); }   // [slice-8: view] release Space → restore mode behavior
   if (/^Arrow/.test(e.key)) commitGesture();   // [slice-6: undo] push the pre-nudge snapshot once the arrow run ends
 });
 
@@ -1012,6 +1059,10 @@ lenInput.addEventListener("keydown", e => {
 document.getElementById("btnDraw").addEventListener("click", startDrawing);
 document.getElementById("btnSelect").addEventListener("click", () => setMode("select"));
 document.getElementById("btnAdd").addEventListener("click", addApt);
+// [slice-8: view] zoom buttons zoom about the viewport center; "Вписать" frames all visible plans
+document.getElementById("btnZoomIn").addEventListener("click", () => zoomBy(1.2));
+document.getElementById("btnZoomOut").addEventListener("click", () => zoomBy(1/1.2));
+document.getElementById("btnFit").addEventListener("click", fitAll);
 const snapSel = document.getElementById("snapSel");
 snapSel.addEventListener("change", e => { state.gridSnap = +e.target.value; commit(); });
 const orthoChk = document.getElementById("orthoChk");
