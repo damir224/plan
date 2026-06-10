@@ -182,6 +182,10 @@ const state = {
 // transient (not saved)
 let cursor = { x: 0, y: 0 };             // svg-screen coords
 let shiftHeld = false;
+let altHeld = false;                     // [slice-3: snap] Alt suppresses line+grid snapping
+// [slice-3: snap] transient snap state for the partition vertex being drawn (one-shot, never stored on the point):
+// { host:{kind:'wall'|'part', seg:[A,B] in LOCAL}, point:{x,y} LOCAL, offsetLeft, offsetRight } | null
+let partSnap = null;
 let drag = null;                         // {type, ...}
 let editWall = null;                     // {id, k} — wall highlighted / being edited
 let wallInput = null;                     // [slice-4: canvas-input] {id, k} — wall whose on-canvas length input is open (null = closed)
@@ -369,15 +373,29 @@ function drawPartDraft(){
   for (let i=0;i<scr.length-1;i++)
     svg.appendChild(el("line", { x1:scr[i].x, y1:scr[i].y, x2:scr[i+1].x, y2:scr[i+1].y, stroke:a.color, "stroke-width":2.5, "stroke-linecap":"round" }));
   for (const p of scr) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:3, fill:a.color }));
+  // [slice-3: snap] compute the preview point once (also refreshes partSnap), then draw rubber band (if a prev point exists)
+  const curL = partDrawPoint(), curS = worldToScreen(localToWorld(a, curL));   // [slice-3: snap]
   if (partDraft.points.length){
     const lastL = partDraft.points[partDraft.points.length-1];
     const last = worldToScreen(localToWorld(a, lastL));
-    const curL = partDrawPoint(), curS = worldToScreen(localToWorld(a, curL));
     svg.appendChild(el("line", { x1:last.x, y1:last.y, x2:curS.x, y2:curS.y, stroke:a.color, "stroke-width":2, "stroke-dasharray":"6 5", opacity:.8 }));
     svg.appendChild(el("circle", { cx:curS.x, cy:curS.y, r:3, fill:a.color }));
     svg.appendChild(lenBadge((last.x+curS.x)/2, (last.y+curS.y)/2 - 10, fmt(dist(lastL, curL))+" м", a.color));
     if (document.activeElement !== lenInput){ lenInput.value = fmt(dist(lastL, curL)); lenInputDirty = false; }  // [slice-2: precision]
   }
+  if (partSnap) drawSnapIndicator(a, curS);   // [slice-3: snap] host-line highlight + point marker + offsets
+}
+
+// [slice-3: snap] indicator for an active partition snap: highlight the host line, mark the snapped point, label both offsets.
+function drawSnapIndicator(a, curS){
+  const A = worldToScreen(localToWorld(a, partSnap.host.seg[0]));
+  const B = worldToScreen(localToWorld(a, partSnap.host.seg[1]));
+  svg.appendChild(el("line", { x1:A.x, y1:A.y, x2:B.x, y2:B.y, stroke:"#1f2430", "stroke-width":2, "stroke-dasharray":"2 4", opacity:.55 }));  // host-line highlight
+  svg.appendChild(el("circle", { cx:curS.x, cy:curS.y, r:6, fill:"none", stroke:"#1f2430", "stroke-width":2 }));   // snapped-point marker
+  // offset labels positioned a bit off the midpoints of each half of the host segment, toward each end
+  const midL = { x:(curS.x+A.x)/2, y:(curS.y+A.y)/2 - 9 }, midR = { x:(curS.x+B.x)/2, y:(curS.y+B.y)/2 - 9 };
+  if (partSnap.offsetLeft  > 0.005) svg.appendChild(lenBadge(midL.x, midL.y, fmt(partSnap.offsetLeft)+" м",  "#1f2430"));
+  if (partSnap.offsetRight > 0.005) svg.appendChild(lenBadge(midR.x, midR.y, fmt(partSnap.offsetRight)+" м", "#1f2430"));
 }
 
 function drawRubber(){
@@ -579,7 +597,7 @@ function setHint(){
   } else if (state.mode === "partition"){
     const a = activeApt();
     if (!a || !a.closed) h.innerHTML = "Сначала нарисуйте <b>контур</b> квартиры (кнопка «Контур»), затем добавляйте перегородки внутри.";
-    else h.innerHTML = "Кликайте внутри активной квартиры — рисуйте <b>перегородку</b>. Точную длину — в поле сверху. <b>Готово</b>: <kbd>Enter</kbd> или двойной клик. <kbd>Esc</kbd> — убрать точку. Затем можно начать следующую.";
+    else h.innerHTML = "Кликайте внутри активной квартиры — рисуйте <b>перегородку</b>. Точную длину — в поле сверху. Вершина <b>прилипает</b> к стенам и перегородкам своей квартиры (видны отступы до концов линии); <kbd>Alt</kbd> — без прилипания. <b>Готово</b>: <kbd>Enter</kbd> или двойной клик. <kbd>Esc</kbd> — убрать точку. Затем можно начать следующую.";
   } else {
     h.innerHTML = "Клик по квартире — выбрать; <b>тащить</b> — двигать; <b>↻</b> — вращать; стрелки — сдвиг. <b>Клик по стене</b> (или аккордеон «Размеры стен») задаёт её длину. Перегородки — кнопка «＋ Перегородка» в карточке. Колесо — масштаб.";
   }
@@ -613,6 +631,46 @@ function closePoly(){ const a = activeApt(); if (!a || a.points.length < 3) retu
 function undoPoint(){ const a = activeApt(); if (!a || a.closed) return; a.points.pop(); commit(); }
 
 // ----- interior partitions (drawn in the apartment's LOCAL space, so they move/rotate with it) -----
+// [slice-3: snap] nearest point on a LOCAL segment [A,B] to local point p (foot clamped to the segment).
+// Returns { foot:{x,y}, t (0..1 clamped), distLocal, len } — all in LOCAL metres.
+function segNearestLocal(p, A, B){
+  const vx = B.x-A.x, vy = B.y-A.y, len2 = vx*vx + vy*vy;
+  let t = len2 < 1e-12 ? 0 : ((p.x-A.x)*vx + (p.y-A.y)*vy) / len2;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const foot = { x: A.x + t*vx, y: A.y + t*vy };
+  return { foot, t, distLocal: Math.hypot(p.x-foot.x, p.y-foot.y), len: Math.sqrt(len2) };
+}
+// [slice-3: snap] find the best host-line snap for a LOCAL cursor point on the ACTIVE apartment ONLY.
+// Candidates: footprint walls (closed loop, all n segments) + each existing partition's segments. Never other apartments,
+// never the footprint draft (footprint is already closed in partition mode). Priority: segment endpoint (corner) > segment line.
+// Thresholds are screen px converted to local via state.scale (stable under zoom). Returns partSnap shape or null.
+function findPartSnap(a, p){
+  if (!a || !a.closed || a.points.length < 3) return null;
+  const cornerL = 12 / state.scale, lineL = 8 / state.scale;   // px → local metres
+  const segs = [];
+  const n = a.points.length;
+  for (let i=0;i<n;i++) segs.push({ kind:"wall", A:a.points[i], B:a.points[(i+1)%n] });   // footprint: closed loop, all n walls
+  for (const part of (a.partitions || []))
+    for (let i=0;i<part.points.length-1;i++) segs.push({ kind:"part", A:part.points[i], B:part.points[i+1] });
+  let bestCorner = null, bestLine = null;
+  for (const s of segs){
+    const nr = segNearestLocal(p, s.A, s.B);
+    // corner: cursor near a segment endpoint (compare distance to the nearer end against the corner threshold)
+    const dA = Math.hypot(p.x-s.A.x, p.y-s.A.y), dB = Math.hypot(p.x-s.B.x, p.y-s.B.y);
+    const endNear = dA <= dB ? s.A : s.B, endDist = Math.min(dA, dB);
+    if (endDist <= cornerL && (!bestCorner || endDist < bestCorner.d))
+      bestCorner = { d:endDist, kind:s.kind, seg:[s.A, s.B], point:{ x:endNear.x, y:endNear.y } };
+    if (nr.distLocal <= lineL && (!bestLine || nr.distLocal < bestLine.d))
+      bestLine = { d:nr.distLocal, kind:s.kind, seg:[s.A, s.B], point:nr.foot };
+  }
+  const hit = bestCorner || bestLine;   // corner wins over line
+  if (!hit) return null;
+  const A = hit.seg[0], B = hit.seg[1];
+  const offsetLeft  = Math.hypot(hit.point.x-A.x, hit.point.y-A.y);   // distance ALONG host line to end A («слева»)
+  const offsetRight = Math.hypot(hit.point.x-B.x, hit.point.y-B.y);   // distance ALONG host line to end B («справа»)
+  return { host:{ kind:hit.kind, seg:[{x:A.x,y:A.y},{x:B.x,y:B.y}] }, point:{ x:hit.point.x, y:hit.point.y }, offsetLeft, offsetRight };
+}
+
 function partDrawPoint(){
   const a = activeApt(); if (!a) return { x:0, y:0 };
   let p = worldToLocal(a, screenToWorld(cursor));
@@ -622,6 +680,11 @@ function partDrawPoint(){
     if (Math.abs(p.x-last.x) >= Math.abs(p.y-last.y)) p = { x:p.x, y:last.y };
     else p = { x:last.x, y:p.y };
   }
+  // [slice-3: snap] line snap to this apartment's own host lines (footprint walls + existing partitions), before grid.
+  // Alt suppresses line AND grid snapping (ortho above still applies). One-shot: nothing is stored on the placed point.
+  partSnap = altHeld ? null : findPartSnap(a, p);
+  if (partSnap){ return { x: partSnap.point.x, y: partSnap.point.y }; }
+  if (altHeld) return p;                               // Alt also skips grid
   const g = state.gridSnap;
   if (g) p = { x: Math.round(p.x/g)*g, y: Math.round(p.y/g)*g };
   return p;
@@ -833,6 +896,7 @@ svg.addEventListener("wheel", e => {
 // ============================== keyboard ==============================
 window.addEventListener("keydown", e => {
   if (e.key === "Shift") shiftHeld = true;
+  if (e.key === "Alt"){ altHeld = true; if (state.mode === "partition") scheduleRender(); }   // [slice-3: snap] Alt suppresses snapping
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && document.activeElement !== lenInput;
   if (typing) return;
   if (state.mode === "draw"){
@@ -852,6 +916,7 @@ window.addEventListener("keydown", e => {
   }
 });
 window.addEventListener("keyup", e => { if (e.key === "Shift"){ shiftHeld = false; if (state.mode==="draw") scheduleRender(); } });
+window.addEventListener("keyup", e => { if (e.key === "Alt"){ altHeld = false; if (state.mode === "partition") scheduleRender(); } });   // [slice-3: snap]
 
 lenInput.addEventListener("input", () => { lenInputDirty = true; });  // [slice-2: precision] real user edit makes the field the source of truth
 lenInput.addEventListener("blur", () => { lenInputDirty = false; });  // [slice-2: precision] re-fill on next render; a stale edit must not survive defocus
