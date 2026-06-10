@@ -932,7 +932,9 @@ function editWallFromCanvas(hit){
     onApply: (raw) => {
       clearEdit();
       const v = parseFloat(raw.replace(",", "."));
+      beginGesture();   // [slice-6: undo] one undo step for the on-canvas wall edit (commitGesture no-ops if unchanged)
       if (setWallLength(a, hit.k, v)){ commit(); syncWalls(a); }   // REUSE: rigid tail-shift + centroid pin
+      commitGesture();
     },
     onCancel: clearEdit,
   });
