@@ -89,6 +89,19 @@
   #viewctrl .btn { background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.12); text-align: center; }
   #viewctrl #btnZoomIn, #viewctrl #btnZoomOut { font-size: 16px; line-height: 1; padding: 5px 0; }
   #stage.spacepan svg { cursor: grab; }
+  /* [slice-9: ux] cheatsheet overlay («?») */
+  #cheatsheet { position: fixed; inset: 0; background: rgba(20,24,33,.42); display: none; align-items: center; justify-content: center; z-index: 50; }
+  #cheatsheet.on { display: flex; }
+  #cheatsheet .sheet { background: #fff; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.28); padding: 18px 20px; width: 360px; max-width: calc(100vw - 40px); max-height: calc(100vh - 40px); overflow-y: auto; }
+  #cheatsheet .sheet h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; }
+  #cheatsheet .sheet h2 .x { margin-left: auto; cursor: pointer; color: #8a909c; font-weight: 400; font-size: 18px; line-height: 1; padding: 0 4px; }
+  #cheatsheet .sheet h2 .x:hover { color: #d23; }
+  #cheatsheet dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; margin: 0; font-size: 13px; align-items: baseline; }
+  #cheatsheet dt { text-align: right; white-space: nowrap; }
+  #cheatsheet dd { margin: 0; color: #4b5160; }
+  /* [slice-9: ux] help button — bottom-right, above the mode chip (top-right is taken by #viewctrl) */
+  #btnHelp { position: absolute; right: 16px; bottom: 56px; width: 28px; height: 28px; border-radius: 50%; border: 1px solid #d3d6dd; background: #fff; color: #4b5160; font-size: 15px; font-weight: 600; cursor: pointer; padding: 0; line-height: 1; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+  #btnHelp:hover { background: #f0f1f4; }
 </style>
 </head>
 <body>
@@ -99,9 +112,9 @@
 
     <div class="section">
       <div class="row" id="modebar">
-        <button class="btn" id="btnDraw" style="flex:1">✏️ Контур</button>
-        <button class="btn" id="btnPart" style="flex:1">🧱 Перегородки</button>
-        <button class="btn" id="btnSelect" style="flex:1">✋ Двигать</button>
+        <button class="btn" id="btnDraw" style="flex:1" title="Рисовать контур квартиры. Enter — замкнуть, Esc — убрать точку">✏️ Контур</button>
+        <button class="btn" id="btnPart" style="flex:1" title="Рисовать перегородки внутри. Enter — готово, Esc — убрать точку">🧱 Перегородки</button>
+        <button class="btn" id="btnSelect" style="flex:1" title="Двигать и вращать. Клик по стене — задать длину, Esc — снять выделение, M — рулетка">✋ Двигать</button>
       </div>
       <div class="hint" id="hint"></div>
     </div>
@@ -109,7 +122,7 @@
     <div class="section">
       <div class="label">Квартиры</div>
       <div id="aptList"></div>
-      <button class="btn" id="btnAdd" style="width:100%">＋ Добавить квартиру</button>
+      <button class="btn" id="btnAdd" style="width:100%" title="Добавить новую квартиру и начать рисовать её контур">＋ Добавить квартиру</button>
     </div>
 
     <div class="section">
@@ -133,9 +146,9 @@
       <div class="label">Данные</div>
       <div class="row">
         <button class="btn small" id="btnExample" title="Загрузить три планировки по умолчанию">3 планировки</button>
-        <button class="btn small" id="btnExport">Экспорт</button>
-        <button class="btn small" id="btnImport">Импорт</button>
-        <button class="btn small" id="btnClear" style="margin-left:auto;color:#d23">Очистить</button>
+        <button class="btn small" id="btnExport" title="Сохранить все квартиры в файл JSON">Экспорт</button>
+        <button class="btn small" id="btnImport" title="Загрузить квартиры из файла JSON">Импорт</button>
+        <button class="btn small" id="btnClear" style="margin-left:auto;color:#d23" title="Удалить все квартиры">Очистить</button>
       </div>
       <input type="file" id="fileIn" accept="application/json" style="display:none">
       <p class="sub" style="margin:8px 0 0">Сохраняется автоматически в браузере.</p>
@@ -158,6 +171,29 @@
       <button class="btn small" id="btnZoomOut" title="Отдалить">−</button>
       <button class="btn small" id="btnFit" title="Вписать всё">Вписать</button>
     </div>
+    <!-- [slice-9: ux] help button — opens the hotkey cheatsheet -->
+    <button id="btnHelp" title="Горячие клавиши (?)">?</button>
+  </div>
+</div>
+
+<!-- [slice-9: ux] hotkey cheatsheet («?») -->
+<div id="cheatsheet">
+  <div class="sheet">
+    <h2>Горячие клавиши<span class="x" id="cheatClose" title="Закрыть">✕</span></h2>
+    <dl>
+      <dt><kbd>Enter</kbd></dt><dd>замкнуть контур / завершить перегородку</dd>
+      <dt><kbd>Esc</kbd></dt><dd>убрать последнюю точку / снять выделение / выйти из рулетки</dd>
+      <dt>0–9 <kbd>.</kbd> <kbd>,</kbd></dt><dd>при рисовании — ввод точной длины в поле</dd>
+      <dt><kbd>Shift</kbd></dt><dd>временно снять «Прямые углы» (Орто)</dd>
+      <dt><kbd>Alt</kbd></dt><dd>временно снять привязку (к линиям и сетке)</dd>
+      <dt><kbd>M</kbd></dt><dd>рулетка — измерить расстояние между двумя точками</dd>
+      <dt><kbd>?</kbd></dt><dd>эта шпаргалка</dd>
+      <dt>стрелки</dt><dd>сдвинуть активную квартиру</dd>
+      <dt>колесо</dt><dd>масштаб</dd>
+      <dt><kbd>пробел</kbd> / правая кнопка</dt><dd>панорама холста</dd>
+      <dt><kbd>Cmd/Ctrl</kbd>+<kbd>Z</kbd></dt><dd>отмена</dd>
+      <dt>двойной клик</dt><dd>замкнуть контур / завершить перегородку</dd>
+    </dl>
   </div>
 </div>
 
@@ -241,6 +277,9 @@ function redo(){                           // [slice-6: undo] re-apply an undone
 // [slice-6: undo] gesture coalescing: capture once at gesture START, push once at END if data changed
 function beginGesture(){ gesturePending = snapshot(); }
 function commitGesture(){ if (gesturePending !== null && gesturePending !== snapshot()){ undoStack.push(gesturePending); if (undoStack.length > UNDO_CAP) undoStack.shift(); redoStack.length = 0; } gesturePending = null; }
+// [slice-9: ux] transient view-only state — never saved
+let hover = null;                         // {kind:'wall'|'vertex'|'label', k} | null — hovered item on the ACTIVE apt
+let ruler = { active:false, a:null, b:null };  // рулетка (tape measure): world points; creates/saves nothing
 
 const stage = document.getElementById("stage");
 const svg = document.getElementById("svg");
@@ -310,6 +349,7 @@ function render(){
   if (state.mode === "draw") drawRubber();
   if (state.mode === "partition") drawPartDraft();
   drawHandles();
+  if (ruler.active) drawRuler();   // [slice-9: ux] tape measure — pure screen/world geometry, over any overlap
   updateHud(W, H);
   updateStats();
   repositionCanvasInput();   // [slice-4: canvas-input] keep an open length input pinned to its wall under pan/zoom/move
@@ -378,6 +418,16 @@ function drawApartment(a){
     if (p1 && p2){
       svg.appendChild(el("line", { x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y, stroke:"#fff", "stroke-width":8, "stroke-linecap":"round", opacity:.85 }));
       svg.appendChild(el("line", { x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y, stroke:a.color, "stroke-width":4, "stroke-linecap":"round" }));
+    }
+  }
+  // [slice-9: ux] hover highlight (active apt, select mode) — light, under the vertices
+  if (isA && hover && state.mode === "select"){
+    if ((hover.kind === "wall" || hover.kind === "label") && hover.k < n-1){
+      const p1 = scr[hover.k], p2 = scr[(hover.k+1)%n];
+      if (p1 && p2) svg.appendChild(el("line", { x1:p1.x, y1:p1.y, x2:p2.x, y2:p2.y, stroke:a.color, "stroke-width":7, "stroke-linecap":"round", opacity:.28 }));
+    } else if (hover.kind === "vertex"){
+      const p = scr[hover.k];
+      if (p) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:7, fill:"none", stroke:a.color, "stroke-width":2, opacity:.55 }));
     }
   }
   // wall length labels
@@ -471,6 +521,18 @@ function drawHandles(){
   const c = worldToScreen(localToWorld(a, centroid(a.points)));
   svg.appendChild(el("line", { x1:c.x-7, y1:c.y, x2:c.x+7, y2:c.y, stroke:a.color, "stroke-width":1.5 }));
   svg.appendChild(el("line", { x1:c.x, y1:c.y-7, x2:c.x, y2:c.y+7, stroke:a.color, "stroke-width":1.5 }));
+}
+
+// [slice-9: ux] tape measure (рулетка) — draw a–b (or a→cursor) + a distance подпись. Creates/saves nothing.
+const RULER_COLOR = "#1f2430";
+function drawRuler(){
+  if (!ruler.a) return;
+  const aS = worldToScreen(ruler.a);
+  const bW = ruler.b || screenToWorld(cursor);
+  const bS = worldToScreen(bW);
+  svg.appendChild(el("line", { x1:aS.x, y1:aS.y, x2:bS.x, y2:bS.y, stroke:RULER_COLOR, "stroke-width":1.5, "stroke-dasharray":"5 4" }));
+  for (const p of [aS, bS]) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:3.5, fill:"#fff", stroke:RULER_COLOR, "stroke-width":1.5 }));
+  svg.appendChild(lenBadge((aS.x+bS.x)/2, (aS.y+bS.y)/2 - 10, fmt(dist(ruler.a, bW)) + " м", RULER_COLOR));
 }
 
 const lenInput = document.getElementById("lenInput");
@@ -642,6 +704,8 @@ function setMode(m){
   lenInputDirty = false;   // [slice-2: precision] don't carry an edit across modes
   state.mode = m;
   stage.className = m;
+  // [slice-9: ux] leaving select clears hover + its inline cursor so the mode's CSS cursor shows (unless ruler owns it)
+  if (m !== "select"){ hover = null; if (!ruler.active) svg.style.cursor = ""; }
   document.getElementById("btnDraw").classList.toggle("active", m === "draw");
   document.getElementById("btnPart").classList.toggle("active", m === "partition");
   document.getElementById("btnSelect").classList.toggle("active", m === "select");
@@ -656,6 +720,8 @@ function startDrawing(){
 }
 function setHint(){
   const h = document.getElementById("hint");
+  // [slice-9: ux] ruler hint takes precedence while the tape measure is on
+  if (ruler.active){ h.innerHTML = "<b>Рулетка</b>: кликните две точки — покажу расстояние. <kbd>Esc</kbd> или <kbd>M</kbd> — выключить. Ничего не создаётся и не сохраняется."; return; }
   if (state.mode === "draw"){
     h.innerHTML = "Кликайте по сетке — ставьте углы <b>контура</b> квартиры. Длина стены видна сразу; точную можно ввести в поле сверху и нажать <kbd>Enter</kbd>. <b>Замкнуть</b>: клик по первой точке или <kbd>Enter</kbd>. <kbd>Esc</kbd> — убрать последнюю. <kbd>Shift</kbd> — временно снять Орто.";
   } else if (state.mode === "partition"){
@@ -920,8 +986,35 @@ window.addEventListener("mousemove", e => {
     return;
   }
   cursor = p;
+  // [slice-9: ux] ruler is modal: live segment to cursor, no hover highlight while it's on
+  if (ruler.active){ scheduleRender(); return; }
   if (state.mode === "draw" || state.mode === "partition") scheduleRender();   // live rubber band
+  // [slice-9: ux] hover highlight of the ACTIVE apartment's interactive bits (select mode only;
+  // updateHover re-renders only when the hovered item changes, so idle moves stay cheap)
+  else if (state.mode === "select") updateHover();
 });
+
+// [slice-9: ux] hit-test the active apartment's vertices / walls / labels under the cursor.
+// Sets `hover` and the stage cursor (pointer when over something clickable). Cheap: reuses screen projections.
+function updateHover(){
+  const prev = hover ? hover.kind + hover.k : "";
+  hover = null;
+  const a = activeApt();
+  if (a && a.closed && a.points.length >= 2){
+    const n = a.points.length;
+    const scr = a.points.map(p => worldToScreen(localToWorld(a, p)));
+    // vertices first (smaller targets)
+    for (let i=0;i<n;i++){ if (dist(cursor, scr[i]) <= 7){ hover = { kind:"vertex", k:i }; break; } }
+    // walls (only the n-1 editable ones — the closing wall is derived/read-only)
+    if (!hover) for (let i=0;i<n-1;i++){ if (segDistScreen(cursor, scr[i], scr[(i+1)%n]) <= 8){ hover = { kind:"wall", k:i }; break; } }
+    // length labels (midpoints) — same editable-wall set
+    if (!hover) for (let i=0;i<n-1;i++){ const mx=(scr[i].x+scr[(i+1)%n].x)/2, my=(scr[i].y+scr[(i+1)%n].y)/2; if (dist(cursor,{x:mx,y:my}) <= 12){ hover = { kind:"label", k:i }; break; } }
+  }
+  // set on the svg itself (it covers the stage; the parent's cursor would be masked by svg's own CSS cursor)
+  svg.style.cursor = hover ? "pointer" : "";
+  const cur = hover ? hover.kind + hover.k : "";
+  if (cur !== prev) scheduleRender();
+}
 
 window.addEventListener("mouseup", e => {
   if (drag){
@@ -937,6 +1030,14 @@ svg.addEventListener("click", e => {
   if (suppressClick){ suppressClick = false; return; }
   if (e.button !== 0) return;
   cursor = svgPos(e);
+  // [slice-9: ux] tape measure intercepts clicks before any mode logic — it never places points / selects.
+  if (ruler.active){
+    const w = screenToWorld(cursor);
+    if (!ruler.a || ruler.b){ ruler.a = w; ruler.b = null; }   // 1st click, or 3rd click restarts
+    else ruler.b = w;                                          // 2nd click sets the far end
+    scheduleRender();
+    return;
+  }
   if (state.mode === "draw"){
     const a = activeApt();
     if (!a || a.closed) addApt();           // start a fresh apartment if needed
@@ -1009,8 +1110,31 @@ window.addEventListener("keydown", e => {
     if (partDraft && partDraft.points.length){ undoPartPoint(); e.preventDefault(); return; }
     undo(); e.preventDefault(); return; // [slice-6: undo] otherwise step the data-history stack
   }
+  // [slice-9: ux] true when focus is in ANY editable field (incl. #lenInput) — gate global single-key shortcuts.
+  const inAnyField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  // [slice-9: ux] «?» toggles the hotkey cheatsheet (only when not typing — otherwise let «?» be typed).
+  if (e.key === "?" && !inAnyField){ toggleCheatsheet(); e.preventDefault(); return; }
+  // [slice-9: ux] Esc closes the cheatsheet first if it's open.
+  if (e.key === "Escape" && cheatOpen){ toggleCheatsheet(false); e.preventDefault(); return; }
+  // [slice-9: ux] «M» toggles the tape measure (рулетка); pressing it again clears it.
+  if ((e.key === "m" || e.key === "M") && !inAnyField){ setRuler(!ruler.active); e.preventDefault(); return; }
+  // [slice-9: ux] Esc exits the ruler before any other Esc meaning.
+  if (e.key === "Escape" && ruler.active){ setRuler(false); e.preventDefault(); return; }
+
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && document.activeElement !== lenInput;
   if (typing) return;
+
+  // [slice-9: ux] while drawing, a digit/separator jumps straight into the length field (first char kept).
+  // Enter is then handled by #lenInput's own keydown (which stopPropagation's → places exactly once).
+  if ((state.mode === "draw" || state.mode === "partition") && !inAnyField && /^[0-9.,]$/.test(e.key)){
+    lenInput.value = e.key;                       // seed with this single char (no char lost)
+    lenInput.dispatchEvent(new Event("input", { bubbles:true }));  // let sibling slice-2 mark lenInputDirty
+    lenInput.focus();
+    try { lenInput.setSelectionRange(lenInput.value.length, lenInput.value.length); } catch(_){}
+    e.preventDefault();                           // don't also type the char elsewhere / lose it
+    return;
+  }
+
   if (state.mode === "draw"){
     if (e.key === "Enter" && document.activeElement !== lenInput){ closePoly(); e.preventDefault(); }
     else if (e.key === "Escape"){ undoPoint(); }
@@ -1026,6 +1150,8 @@ window.addEventListener("keydown", e => {
       if (e.key === "ArrowUp") a.ty -= g; if (e.key === "ArrowDown") a.ty += g;
       commit(); e.preventDefault();
     }
+    // [slice-9: ux] Esc in «Двигать» deselects the active apartment.
+    else if (e.key === "Escape" && state.activeId){ state.activeId = null; renderSidebar(); commit(); }
   }
 });
 window.addEventListener("keyup", e => {
@@ -1054,6 +1180,25 @@ lenInput.addEventListener("keydown", e => {
     e.preventDefault(); e.stopPropagation(); lenInput.blur();
   }
 });
+
+// ============================== [slice-9: ux] cheatsheet + tape measure ==============================
+const cheatEl = document.getElementById("cheatsheet");
+let cheatOpen = false;
+function toggleCheatsheet(force){
+  cheatOpen = (force === undefined) ? !cheatOpen : !!force;
+  cheatEl.classList.toggle("on", cheatOpen);
+}
+document.getElementById("btnHelp").addEventListener("click", () => toggleCheatsheet());
+document.getElementById("cheatClose").addEventListener("click", () => toggleCheatsheet(false));
+cheatEl.addEventListener("click", e => { if (e.target === cheatEl) toggleCheatsheet(false); });  // backdrop click closes
+
+// tape measure (рулетка): transient, creates/saves nothing
+function setRuler(on){
+  ruler.active = !!on;
+  ruler.a = null; ruler.b = null;
+  svg.style.cursor = ruler.active ? "crosshair" : "";  // override mode CSS while measuring
+  setHint(); scheduleRender();
+}
 
 // ============================== sidebar controls ==============================
 document.getElementById("btnDraw").addEventListener("click", startDrawing);
