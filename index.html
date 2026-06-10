@@ -193,6 +193,43 @@ const openWalls = new Set();             // apartment ids whose "Размеры 
 let partDraft = null;                    // {aptId, points:[local]} — interior partition being drawn
 let lenInputDirty = false;               // [slice-2: precision] true once the user edits #lenInput; cleared on every auto-fill
 
+// [slice-6: undo] memory-only history of apartment-data snapshots (NOT persisted; storage schema unchanged)
+const UNDO_CAP = 50;                      // [slice-6: undo] stack depth ~50
+const undoStack = [];                     // [slice-6: undo] snapshots before each data mutation
+const redoStack = [];                     // [slice-6: undo] snapshots undone, available to redo
+let gesturePending = null;               // [slice-6: undo] pre-gesture snapshot held during a drag/slider/name session
+function snapshot(){                       // [slice-6: undo] deep clone of apartment DATA + active selection + id counter
+  return JSON.stringify({ apartments: state.apartments, activeId: state.activeId, idc });
+}
+function restoreSnapshot(s){               // [slice-6: undo] apply a snapshot back into live state
+  const d = JSON.parse(s);
+  state.apartments = d.apartments; state.activeId = d.activeId; idc = d.idc;
+}
+function pushUndo(){                       // [slice-6: undo] record CURRENT state before a mutation; new edit clears redo
+  undoStack.push(snapshot());
+  if (undoStack.length > UNDO_CAP) undoStack.shift();
+  redoStack.length = 0;
+}
+function undo(){                           // [slice-6: undo] restore previous data snapshot
+  if (!undoStack.length) return;
+  redoStack.push(snapshot());
+  restoreSnapshot(undoStack.pop());
+  if (editWall && !state.apartments.some(a => a.id === editWall.id)) editWall = null;
+  partDraft = null;
+  renderSidebar(); commit();
+}
+function redo(){                           // [slice-6: undo] re-apply an undone data snapshot
+  if (!redoStack.length) return;
+  undoStack.push(snapshot());
+  restoreSnapshot(redoStack.pop());
+  if (editWall && !state.apartments.some(a => a.id === editWall.id)) editWall = null;
+  partDraft = null;
+  renderSidebar(); commit();
+}
+// [slice-6: undo] gesture coalescing: capture once at gesture START, push once at END if data changed
+function beginGesture(){ gesturePending = snapshot(); }
+function commitGesture(){ if (gesturePending !== null && gesturePending !== snapshot()){ undoStack.push(gesturePending); if (undoStack.length > UNDO_CAP) undoStack.shift(); redoStack.length = 0; } gesturePending = null; }
+
 const stage = document.getElementById("stage");
 const svg = document.getElementById("svg");
 
@@ -494,14 +531,27 @@ function renderSidebar(){
       ${partsBlockHTML(a)}`;
     // select on card click (ignore clicks inside controls / accordions / partition section)
     card.addEventListener("mousedown", e => { if (e.target.closest("input,button,summary,.walls,.partsec")) return; selectApt(a.id); });
-    card.querySelector(".swatch input").addEventListener("input", e => { a.color = e.target.value; commit(); renderSidebar(); });
-    card.querySelector(".name").addEventListener("input", e => { a.name = e.target.value; save(); });
-    card.querySelector(".vis").addEventListener("change", e => { a.visible = e.target.checked; commit(); });
+    const sw = card.querySelector(".swatch input");
+    sw.addEventListener("focus", beginGesture);   // [slice-6: undo] color pick = one step (begin on picker open)
+    sw.addEventListener("change", commitGesture); // [slice-6: undo] commit on picker close (fires on original even after rebuild)
+    sw.addEventListener("input", e => { a.color = e.target.value; commit(); renderSidebar(); });
+    const nm = card.querySelector(".name");
+    nm.addEventListener("focus", beginGesture);   // [slice-6: undo] name typing = one step
+    nm.addEventListener("blur", commitGesture);   // [slice-6: undo]
+    nm.addEventListener("input", e => { a.name = e.target.value; save(); });
+    card.querySelector(".vis").addEventListener("change", e => { pushUndo(); a.visible = e.target.checked; commit(); });  // [slice-6: undo] discrete
     card.querySelector(".del").addEventListener("click", () => removeApt(a.id));
     const rot = card.querySelector(".rot"), rotn = card.querySelector(".rotn");
+    rot.addEventListener("focus", beginGesture);  // [slice-6: undo] rotation drag = one step
+    rot.addEventListener("change", commitGesture);// [slice-6: undo] range fires change on release
     rot.addEventListener("input", e => { a.rot = +e.target.value; rotn.value = a.rot; commit(); });
+    rotn.addEventListener("focus", beginGesture);  // [slice-6: undo] typing rotation = one step
+    rotn.addEventListener("blur", commitGesture);  // [slice-6: undo]
     rotn.addEventListener("input", e => { a.rot = +e.target.value||0; rot.value = a.rot; commit(); });
-    card.querySelector(".op").addEventListener("input", e => { a.opacity = +e.target.value; commit(); });
+    const op = card.querySelector(".op");
+    op.addEventListener("focus", beginGesture);   // [slice-6: undo] opacity drag = one step
+    op.addEventListener("change", commitGesture); // [slice-6: undo]
+    op.addEventListener("input", e => { a.opacity = +e.target.value; commit(); });
     // walls accordion wiring
     const det = card.querySelector("details.walls");
     if (det){
@@ -513,8 +563,10 @@ function renderSidebar(){
         inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
         inp.addEventListener("change", () => {
           const v = parseFloat(inp.value.replace(",", "."));
+          beginGesture();                                       // [slice-6: undo] snapshot before length edit
           if (setWallLength(a, k, v)){ commit(); syncWalls(a); }
           else inp.value = fmt(wallLen(a, k));
+          commitGesture();                                      // [slice-6: undo] pushes only if geometry changed
         });
       });
     }
@@ -565,8 +617,8 @@ function newApt(){
   return { id: "a"+(++idc), name: "Квартира "+(state.apartments.length+1), color,
     visible: true, opacity: state.apartments.length ? 0.28 : 0.32, points: [], closed: false, tx: 0, ty: 0, rot: 0, partitions: [] };
 }
-function addApt(){ const a = newApt(); state.apartments.push(a); state.activeId = a.id; setMode("draw"); commit(); renderSidebar(); }
-function removeApt(id){ state.apartments = state.apartments.filter(a => a.id !== id); if (state.activeId === id) state.activeId = state.apartments.length ? state.apartments[state.apartments.length-1].id : null; commit(); renderSidebar(); }
+function addApt(){ pushUndo(); const a = newApt(); state.apartments.push(a); state.activeId = a.id; setMode("draw"); commit(); renderSidebar(); }  // [slice-6: undo] push BEFORE newApt() (it ++idc)
+function removeApt(id){ pushUndo(); state.apartments = state.apartments.filter(a => a.id !== id); if (state.activeId === id) state.activeId = state.apartments.length ? state.apartments[state.apartments.length-1].id : null; commit(); renderSidebar(); }  // [slice-6: undo]
 function selectApt(id){ commitDraft(); if (editWall && editWall.id !== id) editWall = null; state.activeId = id; commit(); renderSidebar(); }
 
 function commit(){ save(); scheduleRender(); }
@@ -691,7 +743,7 @@ function partDrawPoint(){
 }
 function placePartPoint(){
   const a = activeApt(); if (!a || !a.closed) return;
-  if (!partDraft || partDraft.aptId !== a.id) partDraft = { aptId:a.id, points:[] };
+  if (!partDraft || partDraft.aptId !== a.id){ pushUndo(); partDraft = { aptId:a.id, points:[] }; }  // [slice-6: undo] snapshot pre-draft; committed partition undoes whole
   const p = partDrawPoint();
   if (partDraft.points.length){
     const last = partDraft.points[partDraft.points.length-1];
@@ -723,7 +775,7 @@ function commitDraft(){   // push a >=2-point draft into its apartment; drop any
 }
 function finishPartition(){ commitDraft(); commit(); renderSidebar(); }
 function undoPartPoint(){ if (!partDraft) return; partDraft.points.pop(); if (!partDraft.points.length) partDraft = null; commit(); }
-function removePartition(id, i){ const a = state.apartments.find(x => x.id === id); if (!a || !a.partitions) return; a.partitions.splice(i, 1); commit(); renderSidebar(); }
+function removePartition(id, i){ const a = state.apartments.find(x => x.id === id); if (!a || !a.partitions) return; pushUndo(); a.partitions.splice(i, 1); commit(); renderSidebar(); }  // [slice-6: undo]
 function startPartition(id){ if (id && id !== state.activeId) state.activeId = id; setMode("partition"); renderSidebar(); }
 
 // ============================== mouse / wheel ==============================
@@ -830,6 +882,7 @@ svg.addEventListener("mousedown", e => {
     }
     if (hit){
       if (state.activeId !== hit.id){ state.activeId = hit.id; renderSidebar(); }
+      beginGesture();   // [slice-6: undo] capture pre-drag; pushed once on mouseup if the plan actually moved
       drag = { type:"move", id:hit.id, startTx:hit.tx, startTy:hit.ty, startW:wpt, moved:false };
     } else drag = { type:"pan", last: cursor, fromEmpty:true, moved:false };
   }
@@ -859,7 +912,8 @@ window.addEventListener("mousemove", e => {
 window.addEventListener("mouseup", e => {
   if (drag){
     if (state.mode === "select" && drag.type === "pan" && drag.fromEmpty && !drag.moved){ state.activeId = null; renderSidebar(); }
-    const wasMove = drag.moved; drag = null;
+    const wasMove = drag.moved, wasMoveDrag = drag.type === "move"; drag = null;
+    if (wasMoveDrag) commitGesture();   // [slice-6: undo] one undo step per move-drag (no-op if it didn't move)
     if (wasMove){ suppressClick = true; }
   }
 });
@@ -897,6 +951,18 @@ svg.addEventListener("wheel", e => {
 window.addEventListener("keydown", e => {
   if (e.key === "Shift") shiftHeld = true;
   if (e.key === "Alt"){ altHeld = true; if (state.mode === "partition") scheduleRender(); }   // [slice-3: snap] Alt suppresses snapping
+  // [slice-6: undo] Cmd/Ctrl+Z = undo, +Shift = redo. Cmd and Ctrl are equivalent.
+  if ((e.metaKey || e.ctrlKey) && typeof e.key === "string" && e.key.toLowerCase() === "z"){
+    const ae = document.activeElement;
+    // text/length fields (name, lenInput, wall/rotation number inputs) keep NATIVE undo — do not intercept
+    const inTextField = ae && ((ae.tagName === "INPUT" && /^(text|number|search|tel|url|email|password)$/i.test(ae.type)) || ae.tagName === "TEXTAREA");
+    if (inTextField) return;            // [slice-6: undo] let the browser do native field undo (no preventDefault)
+    if (e.shiftKey){ redo(); e.preventDefault(); return; }
+    const da = activeApt();             // [slice-6: undo] during a draft, Ctrl+Z drops the last placed point (Esc-like)
+    if (da && !da.closed && da.points.length){ undoPoint(); e.preventDefault(); return; }
+    if (partDraft && partDraft.points.length){ undoPartPoint(); e.preventDefault(); return; }
+    undo(); e.preventDefault(); return; // [slice-6: undo] otherwise step the data-history stack
+  }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && document.activeElement !== lenInput;
   if (typing) return;
   if (state.mode === "draw"){
@@ -908,6 +974,7 @@ window.addEventListener("keydown", e => {
   } else {
     const a = activeApt();
     if (a && /^Arrow/.test(e.key)){
+      if (!e.repeat) beginGesture();   // [slice-6: undo] coalesce a run/tap of arrow nudges into one undo step
       const g = state.gridSnap || 0.1;
       if (e.key === "ArrowLeft") a.tx -= g; if (e.key === "ArrowRight") a.tx += g;
       if (e.key === "ArrowUp") a.ty -= g; if (e.key === "ArrowDown") a.ty += g;
@@ -915,8 +982,11 @@ window.addEventListener("keydown", e => {
     }
   }
 });
-window.addEventListener("keyup", e => { if (e.key === "Shift"){ shiftHeld = false; if (state.mode==="draw") scheduleRender(); } });
-window.addEventListener("keyup", e => { if (e.key === "Alt"){ altHeld = false; if (state.mode === "partition") scheduleRender(); } });   // [slice-3: snap]
+window.addEventListener("keyup", e => {
+  if (e.key === "Shift"){ shiftHeld = false; if (state.mode==="draw") scheduleRender(); }
+  if (e.key === "Alt"){ altHeld = false; if (state.mode === "partition") scheduleRender(); }   // [slice-3: snap]
+  if (/^Arrow/.test(e.key)) commitGesture();   // [slice-6: undo] push the pre-nudge snapshot once the arrow run ends
+});
 
 lenInput.addEventListener("input", () => { lenInputDirty = true; });  // [slice-2: precision] real user edit makes the field the source of truth
 lenInput.addEventListener("blur", () => { lenInputDirty = false; });  // [slice-2: precision] re-fill on next render; a stale edit must not survive defocus
@@ -951,6 +1021,7 @@ labelChk.addEventListener("change", e => { state.showAll = e.target.checked; com
 
 document.getElementById("btnClear").addEventListener("click", () => {
   if (!confirm("Удалить все квартиры?")) return;
+  pushUndo();   // [slice-6: undo] clearing all apartments is undoable
   state.apartments = []; state.activeId = null; commit(); renderSidebar();
 });
 document.getElementById("btnExport").addEventListener("click", () => {
@@ -961,11 +1032,11 @@ document.getElementById("btnExport").addEventListener("click", () => {
 document.getElementById("btnImport").addEventListener("click", () => document.getElementById("fileIn").click());
 document.getElementById("fileIn").addEventListener("change", e => {
   const f = e.target.files[0]; if (!f) return; const r = new FileReader();
-  r.onload = () => { try { const d = JSON.parse(r.result); if (Array.isArray(d.apartments)){ state.apartments = d.apartments; state.activeId = d.apartments.length? d.apartments[0].id : null; idc += d.apartments.length; commit(); renderSidebar(); } } catch(err){ alert("Не удалось прочитать файл"); } };
+  r.onload = () => { try { const d = JSON.parse(r.result); if (Array.isArray(d.apartments)){ pushUndo(); state.apartments = d.apartments; state.activeId = d.apartments.length? d.apartments[0].id : null; idc += d.apartments.length; commit(); renderSidebar(); } } catch(err){ alert("Не удалось прочитать файл"); } };  // [slice-6: undo] push before replacing apartments (captures pre-import idc)
   r.readAsText(f); e.target.value = "";
 });
 
-document.getElementById("btnExample").addEventListener("click", loadExample);
+document.getElementById("btnExample").addEventListener("click", () => { pushUndo(); loadExample(); });  // [slice-6: undo] push only on the button (init's direct loadExample() call stays clean)
 // Три планировки по умолчанию — оцифрованы с реальных планов (исходники в spec/, локально).
 // Контур — внутренние габариты наружных стен, поэтому площадь контура чуть больше паспортной
 // (включает внутренние перегородки). Перегородки упрощены до основных стен, двери не моделируются.
