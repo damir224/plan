@@ -350,6 +350,8 @@ function render(){
   if (state.mode === "draw") drawRubber();
   if (state.mode === "partition") drawPartDraft();
   drawHandles();
+  // [slice-7/#10] snap indicator + offsets while dragging a vertex onto a host line
+  if (drag && drag.type === "vertex" && partSnap){ const da = state.apartments.find(x=>x.id===drag.id); if (da) drawSnapIndicator(da, worldToScreen(localToWorld(da, partSnap.point))); }
   if (ruler.active) drawRuler();   // [slice-9: ux] tape measure — pure screen/world geometry, over any overlap
   updateHud(W, H);
   updateStats();
@@ -781,16 +783,17 @@ function segNearestLocal(p, A, B){
 // Candidates: footprint walls (closed loop, all n segments) + each existing partition's segments. Never other apartments,
 // never the footprint draft (footprint is already closed in partition mode). Priority: segment endpoint (corner) > segment line.
 // Thresholds are screen px converted to local via state.scale (stable under zoom). Returns partSnap shape or null.
-function findPartSnap(a, p){
+function findPartSnap(a, p, skip){          // skip(seg)->bool excludes self-segments when dragging a vertex (#10)
   if (!a || !a.closed || a.points.length < 3) return null;
   const cornerL = 12 / state.scale, lineL = 8 / state.scale;   // px → local metres
   const segs = [];
   const n = a.points.length;
-  for (let i=0;i<n;i++) segs.push({ kind:"wall", A:a.points[i], B:a.points[(i+1)%n] });   // footprint: closed loop, all n walls
-  for (const part of (a.partitions || []))
-    for (let i=0;i<part.points.length-1;i++) segs.push({ kind:"part", A:part.points[i], B:part.points[i+1] });
+  for (let i=0;i<n;i++) segs.push({ kind:"wall", wi:i, A:a.points[i], B:a.points[(i+1)%n] });   // footprint: closed loop, all n walls
+  for (let pi=0; pi<(a.partitions || []).length; pi++){ const part = a.partitions[pi];
+    for (let i=0;i<part.points.length-1;i++) segs.push({ kind:"part", pi, si:i, A:part.points[i], B:part.points[i+1] }); }
   let bestCorner = null, bestLine = null;
   for (const s of segs){
+    if (skip && skip(s)) continue;
     const nr = segNearestLocal(p, s.A, s.B);
     // corner: cursor near a segment endpoint (compare distance to the nearer end against the corner threshold)
     const dA = Math.hypot(p.x-s.A.x, p.y-s.A.y), dB = Math.hypot(p.x-s.B.x, p.y-s.B.y);
@@ -1000,6 +1003,21 @@ function editPartSegFromCanvas(ph){
   scheduleRender();
 }
 
+// [slice-7/#10] nearest draggable vertex of the ACTIVE apartment (footprint + partition vertices).
+// Active-only → in an overlap zone you grab the active plan's vertex, not the topmost.
+function vertexHitTest(s){
+  const a = activeApt(); if (!a || !a.visible || !a.closed) return null;
+  const TH = 8; let best = null, bd = TH;
+  a.points.forEach((p, vi) => { const q = worldToScreen(localToWorld(a, p)); const d = Math.hypot(s.x-q.x, s.y-q.y); if (d < bd){ bd = d; best = { id:a.id, kind:"foot", vi }; } });
+  (a.partitions || []).forEach((part, pi) => part.points.forEach((p, vi) => { const q = worldToScreen(localToWorld(a, p)); const d = Math.hypot(s.x-q.x, s.y-q.y); if (d < bd){ bd = d; best = { id:a.id, kind:"part", pi, vi }; } }));
+  return best;
+}
+// [slice-7/#10] predicate to skip the dragged vertex's own incident segments (no self-snap)
+function vertexSkip(a, t){
+  if (t.kind === "foot"){ const n = a.points.length, prev = (t.vi-1+n)%n; return (s)=> s.kind==="wall" && (s.wi===t.vi || s.wi===prev); }
+  return (s)=> s.kind==="part" && s.pi===t.pi && (s.si===t.vi || s.si===t.vi-1);
+}
+
 svg.addEventListener("contextmenu", e => e.preventDefault());
 
 svg.addEventListener("mousedown", e => {
@@ -1009,6 +1027,14 @@ svg.addEventListener("mousedown", e => {
   if (e.button === 2 || e.button === 1){ drag = { type:"pan", last: cursor }; return; }   // right/middle = pan
   if (state.mode === "select"){
     const wpt = screenToWorld(cursor);
+    // [slice-7/#10] grabbing a vertex of the active apartment wins over moving the whole plan
+    const vHit = vertexHitTest(cursor);
+    if (vHit){
+      if (state.activeId !== vHit.id){ state.activeId = vHit.id; renderSidebar(); }
+      beginGesture();                                  // one undo step per vertex-drag gesture
+      drag = { type:"vertex", id:vHit.id, target:vHit, moved:false };
+      return;
+    }
     // a wall under the cursor wins over polygon reselection (active-preferred) — so clicking a
     // wall in an overlap stays on the active plan instead of jumping to the topmost one.
     const wallHit = wallHitTest(cursor);
@@ -1045,8 +1071,25 @@ window.addEventListener("mousemove", e => {
         a.tx = tx; a.ty = ty;
       }
     }
+    else if (drag.type === "vertex"){       // [slice-7/#10] drag a footprint/partition vertex with snapping + offsets
+      const a = state.apartments.find(x => x.id === drag.id); if (a){
+        const t = drag.target;
+        let local = worldToLocal(a, screenToWorld(p));
+        const snap = altHeld ? null : findPartSnap(a, local, vertexSkip(a, t));   // same host-line snap, minus self-segments
+        partSnap = snap;
+        if (snap) local = { x:snap.point.x, y:snap.point.y };
+        else if (!altHeld && state.gridSnap){ const g = state.gridSnap; local = { x:Math.round(local.x/g)*g, y:Math.round(local.y/g)*g }; }
+        if (t.kind === "foot"){
+          const c0 = a.rot ? centroid(a.points) : null;          // pin world centroid on a rotated apartment (no lurch)
+          a.points[t.vi] = { x:+local.x.toFixed(4), y:+local.y.toFixed(4) };
+          if (c0){ const c1 = centroid(a.points); a.tx += c0.x-c1.x; a.ty += c0.y-c1.y; }
+        } else {
+          a.partitions[t.pi].points[t.vi] = { x:+local.x.toFixed(4), y:+local.y.toFixed(4) };
+        }
+      }
+    }
     cursor = p; scheduleRender();
-    if (drag.type === "move") save();
+    if (drag.type === "move" || drag.type === "vertex") save();
     return;
   }
   cursor = p;
@@ -1083,8 +1126,9 @@ function updateHover(){
 window.addEventListener("mouseup", e => {
   if (drag){
     if (state.mode === "select" && drag.type === "pan" && drag.fromEmpty && !drag.moved){ state.activeId = null; renderSidebar(); }
-    const wasMove = drag.moved, wasMoveDrag = drag.type === "move", wasSpace = drag.space; drag = null;
-    if (wasMoveDrag) commitGesture();   // [slice-6: undo] one undo step per move-drag (no-op if it didn't move)
+    const wasMove = drag.moved, wasGesture = (drag.type === "move" || drag.type === "vertex"), wasVertex = drag.type === "vertex", wasSpace = drag.space; drag = null;
+    if (wasGesture) commitGesture();   // [slice-6: undo] one undo step per move/vertex drag (no-op if it didn't move)
+    if (wasVertex){ partSnap = null; scheduleRender(); }   // [slice-7/#10] clear the snap indicator after the drag
     if (wasMove || wasSpace){ suppressClick = true; }   // [slice-8: view] also suppress click after a space-pan with no movement
   }
 });
