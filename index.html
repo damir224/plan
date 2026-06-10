@@ -238,6 +238,8 @@ let drag = null;                         // {type, ...}
 let editWall = null;                     // {id, k} — wall highlighted / being edited
 let wallInput = null;                     // [slice-4: canvas-input] {id, k} — wall whose on-canvas length input is open (null = closed)
 let partSegInput = null;                  // [slice-4b/#8] {id, pi, si} — partition segment whose on-canvas length input is open
+let offsetInput = null;                   // [slice-5b/#9] {kind:'draft'|'part', pi?, vi, end} — offset label being edited
+let offsetLabels = [];                    // [slice-5b/#9] screen positions of clickable offset labels (rebuilt each render)
 const openWalls = new Set();             // apartment ids whose "Размеры стен" accordion is open
 let partDraft = null;                    // {aptId, points:[local]} — interior partition being drawn
 let lenInputDirty = false;               // [slice-2: precision] true once the user edits #lenInput; cleared on every auto-fill
@@ -352,6 +354,7 @@ function render(){
   drawHandles();
   // [slice-7/#10] snap indicator + offsets while dragging a vertex onto a host line
   if (drag && drag.type === "vertex" && partSnap){ const da = state.apartments.find(x=>x.id===drag.id); if (da) drawSnapIndicator(da, worldToScreen(localToWorld(da, partSnap.point))); }
+  drawOffsetLabels();   // [slice-5b/#9] clickable offset labels for the draft's last point + hovered partition vertex
   if (ruler.active) drawRuler();   // [slice-9: ux] tape measure — pure screen/world geometry, over any overlap
   updateHud(W, H);
   updateStats();
@@ -371,6 +374,11 @@ function repositionCanvasInput(){
     if (!a || !part || partSegInput.si >= part.points.length - 1){ if (canvasInputHandlers) canvasInputHandlers.cancel(); return; }
     const mid = partSegLabelScreen(a, partSegInput.pi, partSegInput.si);
     wallInputEl.style.left = mid.x + "px"; wallInputEl.style.top = mid.y + "px";
+  } else if (offsetInput){                      // [slice-5b/#9] re-pin an offset editor near its vertex
+    const a = activeApt(); const v = a && offsetVertexLocal(a, offsetInput);
+    if (!a || !v){ if (canvasInputHandlers) canvasInputHandlers.cancel(); return; }
+    const s = worldToScreen(localToWorld(a, v));
+    wallInputEl.style.left = s.x + "px"; wallInputEl.style.top = (s.y - 16) + "px";
   }
 }
 
@@ -1018,6 +1026,90 @@ function vertexSkip(a, t){
   return (s)=> s.kind==="part" && s.pi===t.pi && (s.si===t.vi || s.si===t.vi-1);
 }
 
+// ===== [slice-5b / #9] offset editing — slide a vertex along its host line =====
+// the LOCAL host segment a point lies ON (smallest perpendicular distance, within tolerance), excluding own segments;
+// returns { seg:[A,B] LOCAL, offL (along host to A), offR (to B), len } or null. No corner bias — we want the line.
+function vertexHostInfo(a, p, skip){
+  if (!a || !a.closed || a.points.length < 3) return null;
+  const tol = Math.max(0.04, 8 / state.scale);
+  const n = a.points.length, segs = [];
+  for (let i=0;i<n;i++) segs.push({ kind:"wall", wi:i, A:a.points[i], B:a.points[(i+1)%n] });
+  for (let pi=0; pi<(a.partitions || []).length; pi++){ const pp = a.partitions[pi];
+    for (let i=0;i<pp.points.length-1;i++) segs.push({ kind:"part", pi, si:i, A:pp.points[i], B:pp.points[i+1] }); }
+  let best = null;
+  for (const s of segs){
+    if (skip && skip(s)) continue;
+    const nr = segNearestLocal(p, s.A, s.B);
+    if (nr.distLocal <= tol && (!best || nr.distLocal < best.d))
+      best = { d:nr.distLocal, seg:[{x:s.A.x,y:s.A.y},{x:s.B.x,y:s.B.y}],
+               offL:Math.hypot(nr.foot.x-s.A.x, nr.foot.y-s.A.y), offR:Math.hypot(nr.foot.x-s.B.x, nr.foot.y-s.B.y), len:nr.len };
+  }
+  return best;
+}
+function offsetSkip(ref){   // skip the vertex's own partition segments so it doesn't "host" on itself
+  if (ref.kind === "part") return (s)=> s.kind==="part" && s.pi===ref.pi && (s.si===ref.vi || s.si===ref.vi-1);
+  return null;   // a draft point isn't in a.partitions yet → no self-segments among candidates
+}
+function offsetVertexLocal(a, ref){
+  if (ref.kind === "draft") return partDraft && partDraft.points[ref.vi];
+  const part = (a.partitions || [])[ref.pi];
+  return part && part.points[ref.vi];
+}
+// slide ONLY the referenced vertex along its host line to exact distance L from end 'L'(A) or 'R'(B)
+function setVertexToOffset(a, ref, host, end, L){
+  if (!(L >= 0)) return false;
+  const A = host.seg[0], B = host.seg[1], len = Math.hypot(B.x-A.x, B.y-A.y);
+  if (len < 1e-9) return false;
+  const ux = (B.x-A.x)/len, uy = (B.y-A.y)/len;
+  const np = end === "L" ? { x:A.x+ux*L, y:A.y+uy*L } : { x:B.x-ux*L, y:B.y-uy*L };
+  const q = { x:+np.x.toFixed(4), y:+np.y.toFixed(4) };
+  if (ref.kind === "draft"){ if (!partDraft || !partDraft.points[ref.vi]) return false; partDraft.points[ref.vi] = q; }
+  else { const part = (a.partitions || [])[ref.pi]; if (!part || !part.points[ref.vi]) return false; part.points[ref.vi] = q; }
+  return true;
+}
+// editable offset badge — distinct from length labels so it reads as clickable
+function offsetBadge(x, y, s){
+  const g = el("g", {});
+  g.appendChild(el("rect", { x:x-15, y:y-8, width:30, height:16, rx:4, fill:"#fff", stroke:"#2f6df6", "stroke-width":1, opacity:.95 }));
+  const t = txt(x, y, s, "#2f6df6", 11, "middle"); t.setAttribute("dominant-baseline","middle"); t.setAttribute("stroke","none"); t.setAttribute("font-weight","600");
+  g.appendChild(t); svg.appendChild(g);
+}
+// render the (clickable) offset labels for the draft's last point and the hovered partition vertex; fill offsetLabels[]
+function drawOffsetLabels(){
+  offsetLabels = [];
+  const a = activeApt(); if (!a) return;
+  const refs = [];
+  if (partDraft && partDraft.aptId === a.id && partDraft.points.length) refs.push({ kind:"draft", vi: partDraft.points.length-1 });
+  if (state.mode === "select" && hover && hover.kind === "pvertex") refs.push({ kind:"part", pi:hover.pi, vi:hover.vi });
+  for (const ref of refs){
+    const local = offsetVertexLocal(a, ref); if (!local) continue;
+    const host = vertexHostInfo(a, local, offsetSkip(ref)); if (!host) continue;
+    const vS = worldToScreen(localToWorld(a, local));
+    const aS = worldToScreen(localToWorld(a, host.seg[0])), bS = worldToScreen(localToWorld(a, host.seg[1]));
+    const labL = { x:(vS.x+aS.x)/2, y:(vS.y+aS.y)/2 }, labR = { x:(vS.x+bS.x)/2, y:(vS.y+bS.y)/2 };
+    if (host.offL > 0.005){ offsetBadge(labL.x, labL.y, fmt(host.offL)); offsetLabels.push({ x:labL.x, y:labL.y, ref, host, end:"L", value:host.offL }); }
+    if (host.offR > 0.005){ offsetBadge(labR.x, labR.y, fmt(host.offR)); offsetLabels.push({ x:labR.x, y:labR.y, ref, host, end:"R", value:host.offR }); }
+  }
+}
+function offsetLabelHitTest(s){ for (const o of offsetLabels){ if (Math.hypot(s.x-o.x, s.y-o.y) <= 14) return o; } return null; }
+function editOffsetFromCanvas(o){
+  const a = activeApt(); if (!a) return;
+  const clear = () => { offsetInput = null; scheduleRender(); };
+  openCanvasInput({
+    x:o.x, y:o.y, value: fmt(o.value),
+    onApply: (raw) => {
+      clear();
+      const v = parseFloat(raw.replace(",", "."));
+      beginGesture();                                   // [slice-6: undo] one step per offset edit
+      if (setVertexToOffset(a, o.ref, o.host, o.end, v)){ commit(); if (o.ref.kind === "part") renderSidebar(); }
+      commitGesture();
+    },
+    onCancel: clear,
+  });
+  offsetInput = { kind:o.ref.kind, pi:o.ref.pi, vi:o.ref.vi, end:o.end };
+  scheduleRender();
+}
+
 svg.addEventListener("contextmenu", e => e.preventDefault());
 
 svg.addEventListener("mousedown", e => {
@@ -1103,8 +1195,9 @@ window.addEventListener("mousemove", e => {
 
 // [slice-9: ux] hit-test the active apartment's vertices / walls / labels under the cursor.
 // Sets `hover` and the stage cursor (pointer when over something clickable). Cheap: reuses screen projections.
+function hoverKey(h){ return h ? h.kind + (h.k != null ? h.k : h.pi + ":" + h.vi) : ""; }
 function updateHover(){
-  const prev = hover ? hover.kind + hover.k : "";
+  const prev = hoverKey(hover);
   hover = null;
   const a = activeApt();
   if (a && a.closed && a.points.length >= 2){
@@ -1112,6 +1205,11 @@ function updateHover(){
     const scr = a.points.map(p => worldToScreen(localToWorld(a, p)));
     // vertices first (smaller targets)
     for (let i=0;i<n;i++){ if (dist(cursor, scr[i]) <= 7){ hover = { kind:"vertex", k:i }; break; } }
+    // [slice-5b/#9] partition vertices — small specific targets, win over the wall they may sit on (reveal offset labels)
+    if (!hover) for (let pi=0; pi<(a.partitions||[]).length && !hover; pi++){
+      const pscr = a.partitions[pi].points.map(p => worldToScreen(localToWorld(a, p)));
+      for (let vi=0; vi<pscr.length; vi++){ if (dist(cursor, pscr[vi]) <= 7){ hover = { kind:"pvertex", pi, vi }; break; } }
+    }
     // walls (only the n-1 editable ones — the closing wall is derived/read-only)
     if (!hover) for (let i=0;i<n-1;i++){ if (segDistScreen(cursor, scr[i], scr[(i+1)%n]) <= 8){ hover = { kind:"wall", k:i }; break; } }
     // length labels (midpoints) — same editable-wall set
@@ -1119,8 +1217,7 @@ function updateHover(){
   }
   // set on the svg itself (it covers the stage; the parent's cursor would be masked by svg's own CSS cursor)
   svg.style.cursor = hover ? "pointer" : "";
-  const cur = hover ? hover.kind + hover.k : "";
-  if (cur !== prev) scheduleRender();
+  if (hoverKey(hover) !== prev) scheduleRender();
 }
 
 window.addEventListener("mouseup", e => {
@@ -1146,6 +1243,9 @@ svg.addEventListener("click", e => {
     scheduleRender();
     return;
   }
+  // [slice-5b/#9] an offset label intercepts the click in ANY mode (draft & finished) → slide vertex along host
+  const ol = offsetLabelHitTest(cursor);
+  if (ol){ editOffsetFromCanvas(ol); return; }
   if (state.mode === "draw"){
     const a = activeApt();
     if (!a || a.closed) addApt();           // start a fresh apartment if needed
