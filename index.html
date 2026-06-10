@@ -39,26 +39,8 @@
   .apt .stats b { color: #1f2430; font-weight: 600; }
   .apt .ctrls { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: #6b7280; }
   .apt .ctrls input[type=range] { flex: 1; }
-  /* wall-size accordion */
-  .apt details.walls { margin-top: 9px; border-top: 1px solid #eef0f3; padding-top: 8px; }
-  .apt details.walls > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #2f6df6; list-style: none; user-select: none; }
-  .apt details.walls > summary::-webkit-details-marker { display: none; }
-  .apt details.walls > summary::before { content: "▸"; display: inline-block; width: 1em; }
-  .apt details.walls[open] > summary::before { content: "▾"; }
-  .wallnote { font-size: 11px; color: #8a909c; margin: 7px 0; line-height: 1.45; }
-  .wallgrid { display: grid; grid-template-columns: 1fr auto; gap: 5px 8px; align-items: center; }
-  .wallgrid label { font-size: 12px; color: #4b5160; }
-  .wallgrid input.wlen { width: 88px; text-align: right; }
-  .wallgrid .ro { font-size: 12px; color: #98a0ad; width: 88px; text-align: right; font-style: italic; }
   /* mode toolbar (3 buttons) */
   #modebar .btn { font-size: 11.5px; padding: 7px 3px; white-space: nowrap; }
-  /* partitions */
-  .partsec { margin-top: 9px; }
-  .btn.small.addpart { width: 100%; }
-  .partlist { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
-  .partrow { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; color: #4b5160; }
-  .partrow b { font-weight: 600; color: #1f2430; }
-  .partrow .rmpart { padding: 2px 6px; font-size: 12px; }
   .hint { font-size: 12px; line-height: 1.5; color: #6b7280; background: #f4f6fb; border: 1px solid #e4e9f5; border-radius: 8px; padding: 9px 11px; }
   .hint b { color: #1f2430; }
   kbd { background: #eceef2; border: 1px solid #d3d6dd; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; font-family: ui-monospace, monospace; }
@@ -191,6 +173,7 @@
       <dt>стрелки</dt><dd>сдвинуть активную квартиру</dd>
       <dt>колесо</dt><dd>масштаб</dd>
       <dt><kbd>пробел</kbd> / правая кнопка</dt><dd>панорама холста</dd>
+      <dt><kbd>Del</kbd> / <kbd>Backspace</kbd></dt><dd>удалить стену/угол под курсором («Двигать»)</dd>
       <dt><kbd>Cmd/Ctrl</kbd>+<kbd>Z</kbd></dt><dd>отмена</dd>
       <dt>двойной клик</dt><dd>замкнуть контур / завершить перегородку</dd>
     </dl>
@@ -240,7 +223,6 @@ let wallInput = null;                     // [slice-4: canvas-input] {id, k} —
 let partSegInput = null;                  // [slice-4b/#8] {id, pi, si} — partition segment whose on-canvas length input is open
 let offsetInput = null;                   // [slice-5b/#9] {kind:'draft'|'part', pi?, vi, end} — offset label being edited
 let offsetLabels = [];                    // [slice-5b/#9] screen positions of clickable offset labels (rebuilt each render)
-const openWalls = new Set();             // apartment ids whose "Размеры стен" accordion is open
 let partDraft = null;                    // {aptId, points:[local]} — interior partition being drawn
 let lenInputDirty = false;               // [slice-2: precision] true once the user edits #lenInput; cleared on every auto-fill
 
@@ -465,7 +447,6 @@ function drawApartment(a){
   if (isA) for (const p of scr) svg.appendChild(el("circle", { cx:p.x, cy:p.y, r:4, fill:"#fff", stroke:a.color, "stroke-width":2 }));
 }
 
-function partLen(part){ let s=0; for (let i=0;i<part.points.length-1;i++) s += dist(part.points[i], part.points[i+1]); return s; }
 
 // interior partitions, transformed by the apartment (so they move/rotate with the overlay)
 function drawPartitions(a){
@@ -532,12 +513,24 @@ function drawRubber(){
   if (document.activeElement !== lenInput){ lenInput.value = fmt(len); lenInputDirty = false; }  // [slice-2: precision]
 }
 
+// [rotate] screen position of the rotation knob: fixed pixel distance from centroid along the apartment's
+// own "up" axis (so the knob orbits as rot changes). Returns the knob point + the centroid screen point.
+const ROT_HANDLE_PX = 46;
+function rotateHandleScreen(a){
+  const c = worldToScreen(localToWorld(a, centroid(a.points)));
+  const rad = a.rot * Math.PI/180;
+  return { x: c.x + Math.sin(rad)*ROT_HANDLE_PX, y: c.y - Math.cos(rad)*ROT_HANDLE_PX, c };
+}
 function drawHandles(){
   const a = activeApt();
   if (state.mode !== "select" || !a || a.points.length < 2) return;
   const c = worldToScreen(localToWorld(a, centroid(a.points)));
   svg.appendChild(el("line", { x1:c.x-7, y1:c.y, x2:c.x+7, y2:c.y, stroke:a.color, "stroke-width":1.5 }));
   svg.appendChild(el("line", { x1:c.x, y1:c.y-7, x2:c.x, y2:c.y+7, stroke:a.color, "stroke-width":1.5 }));
+  // [rotate] rotation knob: drag it to spin the apartment around its centroid (Shift = 15° steps)
+  const h = rotateHandleScreen(a), rotating = drag && drag.type === "rotate";
+  svg.appendChild(el("line", { x1:c.x, y1:c.y, x2:h.x, y2:h.y, stroke:a.color, "stroke-width":1.5, opacity:.6 }));
+  svg.appendChild(el("circle", { cx:h.x, cy:h.y, r:6, fill: rotating ? a.color : "#fff", stroke:a.color, "stroke-width":2 }));
 }
 
 // [slice-9: ux] tape measure (рулетка) — draw a–b (or a→cursor) + a distance подпись. Creates/saves nothing.
@@ -573,31 +566,6 @@ function updateHud(W, H){
 const aptList = document.getElementById("aptList");
 
 function wallLen(a, i){ const n = a.points.length; return dist(a.points[i], a.points[(i+1)%n]); }
-function wallsAccordionHTML(a){
-  if (!a.closed || a.points.length < 3) return "";
-  const n = a.points.length; let rows = "";
-  for (let i=0;i<n;i++){
-    if (i === n-1)  // closing wall — derived, read-only
-      rows += `<label>Стена ${i+1} <span style="color:#aeb3bd">(замык.)</span></label><span class="ro" data-w="${i}">${fmt(wallLen(a,i))} м</span>`;
-    else
-      rows += `<label>Стена ${i+1}</label><input type="number" class="wlen" data-w="${i}" step="0.01" min="0.1" value="${fmt(wallLen(a,i))}">`;
-  }
-  return `<details class="walls"${openWalls.has(a.id)?" open":""}>
-      <summary>Размеры стен (${n})</summary>
-      <div class="wallnote">Длина стены в метрах. Последняя (<i>замыкающая</i>) стена подгоняется сама, чтобы контур остался замкнутым — на холсте она показана пунктиром с меткой «авто».</div>
-      <div class="wallgrid">${rows}</div>
-    </details>`;
-}
-function partsBlockHTML(a){
-  if (!a.closed || a.points.length < 3) return "";
-  const parts = a.partitions || [];
-  let rows = "";
-  parts.forEach((p,i)=>{ rows += `<div class="partrow"><span>Перегородка ${i+1} · <b>${fmt(partLen(p))} м</b></span><button class="btn ghost rmpart" data-i="${i}" title="Удалить">✕</button></div>`; });
-  return `<div class="partsec">
-      <button class="btn small addpart">＋ Перегородка</button>
-      ${parts.length ? `<div class="partlist">${rows}</div>` : ""}
-    </div>`;
-}
 
 function renderSidebar(){
   aptList.innerHTML = "";
@@ -617,11 +585,9 @@ function renderSidebar(){
       <div class="stats"><span>Площадь: <b class="area">—</b></span><span>Периметр: <b class="peri">—</b></span><span class="open" style="color:#e8a23c"></span></div>
       <div class="ctrls">↻ <input type="range" class="rot" min="-180" max="180" step="1" value="${a.rot}">
         <input type="number" class="rotn" value="${a.rot}" step="1" style="width:56px">°</div>
-      <div class="ctrls">◐ <input type="range" class="op" min="0.05" max="0.8" step="0.05" value="${a.opacity}"></div>
-      ${wallsAccordionHTML(a)}
-      ${partsBlockHTML(a)}`;
-    // select on card click (ignore clicks inside controls / accordions / partition section)
-    card.addEventListener("mousedown", e => { if (e.target.closest("input,button,summary,.walls,.partsec")) return; selectApt(a.id); });
+      <div class="ctrls">◐ <input type="range" class="op" min="0.05" max="0.8" step="0.05" value="${a.opacity}"></div>`;
+    // select on card click (ignore clicks inside controls)
+    card.addEventListener("mousedown", e => { if (e.target.closest("input,button")) return; selectApt(a.id); });
     const sw = card.querySelector(".swatch input");
     sw.addEventListener("focus", beginGesture);   // [slice-6: undo] color pick = one step (begin on picker open)
     sw.addEventListener("change", commitGesture); // [slice-6: undo] commit on picker close (fires on original even after rebuild)
@@ -643,28 +609,7 @@ function renderSidebar(){
     op.addEventListener("focus", beginGesture);   // [slice-6: undo] opacity drag = one step
     op.addEventListener("change", commitGesture); // [slice-6: undo]
     op.addEventListener("input", e => { a.opacity = +e.target.value; commit(); });
-    // walls accordion wiring
-    const det = card.querySelector("details.walls");
-    if (det){
-      det.addEventListener("toggle", () => { if (det.open) openWalls.add(a.id); else openWalls.delete(a.id); });
-      card.querySelectorAll("input.wlen").forEach(inp => {
-        const k = +inp.dataset.w;
-        inp.addEventListener("focus", () => { editWall = { id:a.id, k }; scheduleRender(); });
-        inp.addEventListener("blur",  () => { if (editWall && editWall.id===a.id && editWall.k===k){ editWall = null; scheduleRender(); } });
-        inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
-        inp.addEventListener("change", () => {
-          const v = parseFloat(inp.value.replace(",", "."));
-          beginGesture();                                       // [slice-6: undo] snapshot before length edit
-          if (setWallLength(a, k, v)){ commit(); syncWalls(a); }
-          else inp.value = fmt(wallLen(a, k));
-          commitGesture();                                      // [slice-6: undo] pushes only if geometry changed
-        });
-      });
-    }
-    // partitions wiring
-    const addp = card.querySelector(".addpart");
-    if (addp) addp.addEventListener("click", () => startPartition(a.id));
-    card.querySelectorAll(".rmpart").forEach(b => b.addEventListener("click", () => removePartition(a.id, +b.dataset.i)));
+    // длины стен и перегородок правятся прямо на холсте — отдельных списков в сайдбаре больше нет
     aptList.appendChild(card);
   });
   updateStats();
@@ -695,12 +640,7 @@ function setWallLength(a, k, L){
   return true;
 }
 // refresh one card's wall fields + closing length + stats in place (no rebuild → keeps focus/open state)
-function syncWalls(a){
-  const card = [...aptList.querySelectorAll(".apt")][state.apartments.indexOf(a)]; if (!card) return;
-  card.querySelectorAll("input.wlen").forEach(inp => { if (document.activeElement !== inp) inp.value = fmt(wallLen(a, +inp.dataset.w)); });
-  const ro = card.querySelector(".wallgrid .ro"); if (ro) ro.textContent = fmt(wallLen(a, +ro.dataset.w)) + " м";
-  updateStats();
-}
+function syncWalls(a){ updateStats(); }   // wall-length lists removed from sidebar — only card stats need refreshing now
 
 // ============================== apartment ops ==============================
 function newApt(){
@@ -746,7 +686,7 @@ function setHint(){
     if (!a || !a.closed) h.innerHTML = "Сначала нарисуйте <b>контур</b> квартиры (кнопка «Контур»), затем добавляйте перегородки внутри.";
     else h.innerHTML = "Кликайте внутри активной квартиры — рисуйте <b>перегородку</b>. Точную длину — в поле сверху. Вершина <b>прилипает</b> к стенам и перегородкам своей квартиры (видны отступы до концов линии); <kbd>Alt</kbd> — без прилипания. <b>Готово</b>: <kbd>Enter</kbd> или двойной клик. <kbd>Esc</kbd> — убрать точку. Затем можно начать следующую.";
   } else {
-    h.innerHTML = "Клик по квартире — выбрать; <b>тащить</b> — двигать; <b>↻</b> — вращать; стрелки — сдвиг. <b>Клик по стене</b> (или аккордеон «Размеры стен») задаёт её длину. Перегородки — кнопка «＋ Перегородка» в карточке. Колесо — масштаб.";
+    h.innerHTML = "Клик по квартире — выбрать; <b>тащить</b> — двигать; <b>ручка ↻</b> над центром (или слайдер) — вращать; стрелки — сдвиг; тащить вершину — править форму. <b>Клик по стене</b> задаёт длину (<kbd>0</kbd> или <kbd>Del</kbd> — удалить стену). Перегородки — кнопка «🧱 Перегородки». Колесо — масштаб.";
   }
 }
 
@@ -872,6 +812,38 @@ function commitDraft(){   // push a >=2-point draft into its apartment; drop any
 function finishPartition(){ commitDraft(); commit(); renderSidebar(); }
 function undoPartPoint(){ if (!partDraft) return; partDraft.points.pop(); if (!partDraft.points.length) partDraft = null; commit(); }
 function removePartition(id, i){ const a = state.apartments.find(x => x.id === id); if (!a || !a.partitions) return; pushUndo(); a.partitions.splice(i, 1); commit(); renderSidebar(); }  // [slice-6: undo]
+
+// [delete] remove a footprint vertex IN PLACE (neighbours reconnect; no tail-slide, which can self-intersect);
+// re-pins the world centroid on a rotated apartment; keeps a valid polygon (>=3 vertices).
+function deleteFootVertex(a, vi){
+  if (!a || a.points.length <= 3) return false;
+  const c0 = a.rot ? centroid(a.points) : null;
+  a.points.splice(vi, 1);
+  if (c0){ const c1 = centroid(a.points); a.tx += c0.x - c1.x; a.ty += c0.y - c1.y; }
+  return true;
+}
+// [delete] remove a partition vertex; a partition left with <2 points is dropped entirely
+function deletePartVertex(a, pi, vi){
+  const part = (a.partitions || [])[pi]; if (!part) return false;
+  part.points.splice(vi, 1);
+  if (part.points.length < 2) a.partitions.splice(pi, 1);
+  return true;
+}
+// [delete] Del/Backspace target: the wall/vertex/partition-vertex under the cursor (select mode).
+// "Delete a wall k" = remove its far corner (vertex k+1) so the contour reconnects. One undo step.
+function deleteHovered(){
+  const a = activeApt();
+  if (!a || !hover || !/^(vertex|wall|label|pvertex)$/.test(hover.kind)) return false;
+  pushUndo();
+  const n = a.points.length;
+  let ok = false;
+  if (hover.kind === "vertex") ok = deleteFootVertex(a, hover.k);
+  else if (hover.kind === "wall" || hover.kind === "label") ok = deleteFootVertex(a, (hover.k + 1) % n);
+  else if (hover.kind === "pvertex") ok = deletePartVertex(a, hover.pi, hover.vi);
+  if (ok){ hover = null; commit(); renderSidebar(); }
+  else undoStack.pop();   // guard blocked (e.g. triangle) → discard the snapshot
+  return ok;
+}
 function startPartition(id){ if (id && id !== state.activeId) state.activeId = id; setMode("partition"); renderSidebar(); }
 
 // ============================== mouse / wheel ==============================
@@ -950,6 +922,12 @@ function editWallFromCanvas(hit){
     onApply: (raw) => {
       clearEdit();
       const v = parseFloat(raw.replace(",", "."));
+      if (v === 0){   // [delete] entering 0 deletes the wall (removes its far corner; contour reconnects)
+        pushUndo();
+        if (deleteFootVertex(a, (hit.k + 1) % a.points.length)){ commit(); renderSidebar(); }
+        else undoStack.pop();
+        return;
+      }
       beginGesture();   // [slice-6: undo] one undo step for the on-canvas wall edit (commitGesture no-ops if unchanged)
       if (setWallLength(a, hit.k, v)){ commit(); syncWalls(a); }   // REUSE: rigid tail-shift + centroid pin
       commitGesture();
@@ -1119,6 +1097,16 @@ svg.addEventListener("mousedown", e => {
   if (e.button === 2 || e.button === 1){ drag = { type:"pan", last: cursor }; return; }   // right/middle = pan
   if (state.mode === "select"){
     const wpt = screenToWorld(cursor);
+    // [rotate] grabbing the rotation knob of the active apartment wins over everything else
+    const aAct = activeApt();
+    if (aAct && aAct.points.length >= 2){
+      const rh = rotateHandleScreen(aAct);
+      if (Math.hypot(cursor.x-rh.x, cursor.y-rh.y) <= 10){
+        beginGesture();                                // one undo step per rotation gesture
+        drag = { type:"rotate", id:aAct.id, cx:rh.c.x, cy:rh.c.y, startAngle: Math.atan2(cursor.y-rh.c.y, cursor.x-rh.c.x), startRot: aAct.rot, moved:false };
+        return;
+      }
+    }
     // [slice-7/#10] grabbing a vertex of the active apartment wins over moving the whole plan
     const vHit = vertexHitTest(cursor);
     if (vHit){
@@ -1163,6 +1151,14 @@ window.addEventListener("mousemove", e => {
         a.tx = tx; a.ty = ty;
       }
     }
+    else if (drag.type === "rotate"){       // [rotate] spin the apartment around its centroid; Shift = 15° steps
+      const a = state.apartments.find(x => x.id === drag.id); if (a){
+        const ang = Math.atan2(p.y-drag.cy, p.x-drag.cx);
+        let deg = drag.startRot + (ang - drag.startAngle) * 180/Math.PI;
+        deg = shiftHeld ? Math.round(deg/15)*15 : Math.round(deg);
+        a.rot = ((deg % 360) + 540) % 360 - 180;       // normalize to (-180, 180]
+      }
+    }
     else if (drag.type === "vertex"){       // [slice-7/#10] drag a footprint/partition vertex with snapping + offsets
       const a = state.apartments.find(x => x.id === drag.id); if (a){
         const t = drag.target;
@@ -1181,7 +1177,7 @@ window.addEventListener("mousemove", e => {
       }
     }
     cursor = p; scheduleRender();
-    if (drag.type === "move" || drag.type === "vertex") save();
+    if (drag.type === "move" || drag.type === "vertex" || drag.type === "rotate") save();
     return;
   }
   cursor = p;
@@ -1223,9 +1219,10 @@ function updateHover(){
 window.addEventListener("mouseup", e => {
   if (drag){
     if (state.mode === "select" && drag.type === "pan" && drag.fromEmpty && !drag.moved){ state.activeId = null; renderSidebar(); }
-    const wasMove = drag.moved, wasGesture = (drag.type === "move" || drag.type === "vertex"), wasVertex = drag.type === "vertex", wasSpace = drag.space; drag = null;
-    if (wasGesture) commitGesture();   // [slice-6: undo] one undo step per move/vertex drag (no-op if it didn't move)
+    const wasMove = drag.moved, wasGesture = (drag.type === "move" || drag.type === "vertex" || drag.type === "rotate"), wasVertex = drag.type === "vertex", wasRotate = drag.type === "rotate", wasSpace = drag.space; drag = null;
+    if (wasGesture) commitGesture();   // [slice-6: undo] one undo step per move/vertex/rotate drag (no-op if it didn't move)
     if (wasVertex){ partSnap = null; scheduleRender(); }   // [slice-7/#10] clear the snap indicator after the drag
+    if (wasRotate) renderSidebar();    // [rotate] keep the sidebar ↻ slider/number in sync after a canvas rotation
     if (wasMove || wasSpace){ suppressClick = true; }   // [slice-8: view] also suppress click after a space-pan with no movement
   }
 });
@@ -1362,6 +1359,8 @@ window.addEventListener("keydown", e => {
     }
     // [slice-9: ux] Esc in «Двигать» deselects the active apartment.
     else if (e.key === "Escape" && state.activeId){ state.activeId = null; renderSidebar(); commit(); }
+    // [delete] Del/Backspace removes the wall/vertex/partition-vertex under the cursor
+    else if ((e.key === "Delete" || e.key === "Backspace") && !inAnyField){ if (deleteHovered()) e.preventDefault(); }
   }
 });
 window.addEventListener("keyup", e => {
@@ -1412,6 +1411,7 @@ function setRuler(on){
 
 // ============================== sidebar controls ==============================
 document.getElementById("btnDraw").addEventListener("click", startDrawing);
+document.getElementById("btnPart").addEventListener("click", () => startPartition(state.activeId));   // вход в режим перегородок (раньше был только в карточке)
 document.getElementById("btnSelect").addEventListener("click", () => setMode("select"));
 document.getElementById("btnAdd").addEventListener("click", addApt);
 // [slice-8: view] zoom buttons zoom about the viewport center; "Вписать" frames all visible plans
