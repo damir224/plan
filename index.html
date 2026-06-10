@@ -159,7 +159,7 @@ function centroid(pts){ if (!pts.length) return {x:0,y:0}; let x=0,y=0; for (con
 function polyArea(pts){ let s=0; const n=pts.length; for (let i=0;i<n;i++){ const a=pts[i], b=pts[(i+1)%n]; s += a.x*b.y - b.x*a.y; } return Math.abs(s)/2; }
 function polyPerim(pts, closed){ const n=pts.length; if (n<2) return 0; let s=0; const m = closed? n : n-1; for (let i=0;i<m;i++){ s += dist(pts[i], pts[(i+1)%n]); } return s; }
 function pointInPoly(p, pts){ let inside=false; for (let i=0,j=pts.length-1;i<pts.length;j=i++){ const xi=pts[i].x,yi=pts[i].y,xj=pts[j].x,yj=pts[j].y; if (((yi>p.y)!==(yj>p.y)) && (p.x < (xj-xi)*(p.y-yi)/(yj-yi)+xi)) inside=!inside; } return inside; }
-function fmt(n){ const r = Math.round(n*100)/100; return (Object.is(r,-0)?0:r).toString(); }
+function fmt(n){ const s = n < 0 ? -1 : 1; const r = s * Math.round(Math.abs(n)*100 + 1e-6) / 100; return (Object.is(r,-0)?0:r).toString(); }  // [slice-2: precision] round-half-up at 0.01 (sign-aware ε defeats 100.4999… float trap)
 function niceStep(m){ const a=[0.1,0.2,0.25,0.5,1,2,2.5,5,10,20,25,50,100]; for (const s of a) if (s>=m) return s; return 200; }
 
 // ============================== state ==============================
@@ -180,6 +180,7 @@ let drag = null;                         // {type, ...}
 let editWall = null;                     // {id, k} — wall highlighted / being edited
 const openWalls = new Set();             // apartment ids whose "Размеры стен" accordion is open
 let partDraft = null;                    // {aptId, points:[local]} — interior partition being drawn
+let lenInputDirty = false;               // [slice-2: precision] true once the user edits #lenInput; cleared on every auto-fill
 
 const stage = document.getElementById("stage");
 const svg = document.getElementById("svg");
@@ -357,7 +358,7 @@ function drawPartDraft(){
     svg.appendChild(el("line", { x1:last.x, y1:last.y, x2:curS.x, y2:curS.y, stroke:a.color, "stroke-width":2, "stroke-dasharray":"6 5", opacity:.8 }));
     svg.appendChild(el("circle", { cx:curS.x, cy:curS.y, r:3, fill:a.color }));
     svg.appendChild(lenBadge((last.x+curS.x)/2, (last.y+curS.y)/2 - 10, fmt(dist(lastL, curL))+" м", a.color));
-    if (document.activeElement !== lenInput) lenInput.value = fmt(dist(lastL, curL));
+    if (document.activeElement !== lenInput){ lenInput.value = fmt(dist(lastL, curL)); lenInputDirty = false; }  // [slice-2: precision]
   }
 }
 
@@ -376,7 +377,7 @@ function drawRubber(){
     if (dist(cursor, first) < 14) svg.appendChild(el("circle", { cx:first.x, cy:first.y, r:8, fill:"none", stroke:a.color, "stroke-width":2 }));
   }
   // live length field
-  if (document.activeElement !== lenInput) lenInput.value = fmt(len);
+  if (document.activeElement !== lenInput){ lenInput.value = fmt(len); lenInputDirty = false; }  // [slice-2: precision]
 }
 
 function drawHandles(){
@@ -537,6 +538,7 @@ function commit(){ save(); scheduleRender(); }
 function setMode(m){
   let committed = false;
   if (state.mode === "partition" && m !== "partition"){ committed = !!(partDraft && partDraft.points.length >= 2); commitDraft(); }
+  lenInputDirty = false;   // [slice-2: precision] don't carry an edit across modes
   state.mode = m;
   stage.className = m;
   document.getElementById("btnDraw").classList.toggle("active", m === "draw");
@@ -574,6 +576,11 @@ function placePoint(w){
   a.points.push({ x: +w.x.toFixed(4), y: +w.y.toFixed(4) });
   commit();
 }
+// [slice-2: precision] exact length the footprint rubber band currently represents (last point → live cursor)
+function drawExactRubberLen(){
+  const a = activeApt(); if (!a || a.closed || !a.points.length) return 0;
+  return dist(a.points[a.points.length-1], drawWorld());
+}
 function placeExactLength(L){
   const a = activeApt(); if (!a || a.closed || !a.points.length || !(L>0)) return;
   const last = a.points[a.points.length-1];
@@ -610,6 +617,12 @@ function placePartPoint(){
   }
   partDraft.points.push({ x:+p.x.toFixed(4), y:+p.y.toFixed(4) });
   commit();
+}
+// [slice-2: precision] exact length the partition rubber band currently represents (last point → live cursor)
+function partExactRubberLen(){
+  const a = activeApt();
+  if (!a || !a.closed || !partDraft || partDraft.aptId !== a.id || !partDraft.points.length) return 0;
+  return dist(partDraft.points[partDraft.points.length-1], partDrawPoint());
 }
 function placePartExactLength(L){
   const a = activeApt();
@@ -771,10 +784,20 @@ window.addEventListener("keydown", e => {
 });
 window.addEventListener("keyup", e => { if (e.key === "Shift"){ shiftHeld = false; if (state.mode==="draw") scheduleRender(); } });
 
+lenInput.addEventListener("input", () => { lenInputDirty = true; });  // [slice-2: precision] real user edit makes the field the source of truth
+lenInput.addEventListener("blur", () => { lenInputDirty = false; });  // [slice-2: precision] re-fill on next render; a stale edit must not survive defocus
 lenInput.addEventListener("keydown", e => {
   if (e.key === "Enter"){
-    const v = parseFloat(lenInput.value.replace(",", "."));
-    if (state.mode === "partition") placePartExactLength(v); else placeExactLength(v);
+    // [slice-2: precision] if the user edited the field, honour the exact typed number;
+    // otherwise place by the ACTUAL rubber-band length (the rounded display string is not the source of truth).
+    if (state.mode === "partition"){
+      const v = lenInputDirty ? parseFloat(lenInput.value.replace(",", ".")) : partExactRubberLen();
+      placePartExactLength(v);
+    } else {
+      const v = lenInputDirty ? parseFloat(lenInput.value.replace(",", ".")) : drawExactRubberLen();
+      placeExactLength(v);
+    }
+    lenInputDirty = false;
     // stop here: blur() below changes activeElement, which would otherwise let the window
     // keydown handler also fire closePoly()/finishPartition() — a double action.
     e.preventDefault(); e.stopPropagation(); lenInput.blur();
